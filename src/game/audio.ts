@@ -54,14 +54,15 @@ class AeroAudioEngine {
   constructor() {
     if (typeof window !== 'undefined') {
       const unlockAudio = () => {
+        this.ensureContext();
         if (this.musicTheme === 'pro_theme') {
           this.syncProThemePlayback();
         } else if (this.musicMode !== 'off') {
           this.startMusic(this.musicMode);
         }
       };
-      window.addEventListener('pointerdown', unlockAudio, { passive: true });
-      window.addEventListener('keydown', unlockAudio, { passive: true });
+      window.addEventListener('pointerdown', unlockAudio, { passive: true, capture: true });
+      window.addEventListener('keydown', unlockAudio, { passive: true, capture: true });
     }
   }
 
@@ -1217,16 +1218,41 @@ class AeroAudioEngine {
     this.playSfxNote(293.66, now + 0.14, 0.4, 0.065, true);
   }
 
-  public playBoostPad() {
+  /**
+   * Plays a high-energy 3-Arrow Sequential Boost Pad SFX (`>>>`) with turbine afterburner whoosh.
+   * Scales pitch and sequential tempo progressively as the player chains consecutive boost pads in series (`comboCount = 1, 2, 3...`).
+   */
+  public playBoostPad(comboCount = 1) {
     if (this.muted || this.sfxVolume <= 0.01) return;
     const ctx = this.ensureContext();
     if (!ctx || !this.sfxBusGain) return;
     const now = ctx.currentTime;
 
-    this.playSfxSubImpact(115, now, 0.28, 0.09);
-    this.playSfxNote(293.66, now, 0.28, 0.09, true);
-    this.playSfxNote(440.0, now + 0.04, 0.3, 0.085, true);
-    this.playSfxNote(587.33, now + 0.08, 0.34, 0.08, true);
+    const clampedCombo = Math.max(1, Math.min(6, Math.round(comboCount)));
+    // Transpose upward by +2 semitones per consecutive boost pad in series
+    const comboPitchMult = Math.pow(2, ((clampedCombo - 1) * 2) / 12);
+    // Progressively faster 3-arrow ignition cadence as combo builds
+    const arrowStepSec = Math.max(0.020, 0.044 - (clampedCombo - 1) * 0.005);
+
+    this.playSfxSubImpact(125 * Math.min(1.35, comboPitchMult), now, 0.34, 0.145);
+
+    // 3 Sequential Electric-Blue Arrow Ignition Notes (Arrow 1 -> Arrow 2 -> Arrow 3)
+    const f1 = 329.63 * comboPitchMult; // E4
+    const f2 = 440.0 * comboPitchMult;  // A4
+    const f3 = 659.25 * comboPitchMult; // E5
+    this.playSfxNote(f1, now, 0.28, 0.125, true, 'sawtooth');
+    this.playSfxNote(f2, now + arrowStepSec, 0.30, 0.125, true, 'sawtooth');
+    this.playSfxNote(f3, now + arrowStepSec * 2, 0.38, 0.135, true, 'triangle');
+
+    // Extra high-harmonic combo reward chime on 2nd, 3rd+ consecutive pads in series
+    if (clampedCombo >= 2) {
+      const f4 = 880.0 * comboPitchMult;
+      this.playSfxNote(f4, now + arrowStepSec * 3, 0.42, 0.115, true, 'sine');
+    }
+    if (clampedCombo >= 3) {
+      const f5 = 1318.5 * comboPitchMult;
+      this.playSfxNote(f5, now + arrowStepSec * 3.8, 0.46, 0.105, true, 'sine');
+    }
 
     if (this.noiseBuffer) {
       try {
@@ -1235,22 +1261,54 @@ class AeroAudioEngine {
         const filter = ctx.createBiquadFilter();
         filter.type = 'bandpass';
         filter.Q.value = this.sfxPreset === 'plasma_overdrive' ? 3.2 : 1.8;
-        filter.frequency.setValueAtTime(320, now);
-        filter.frequency.exponentialRampToValueAtTime(1850, now + 0.28);
+        filter.frequency.setValueAtTime(360 * Math.min(1.4, comboPitchMult), now);
+        filter.frequency.exponentialRampToValueAtTime(
+          2400 * Math.min(1.5, comboPitchMult),
+          now + 0.32
+        );
 
         const gain = ctx.createGain();
-        gain.gain.setValueAtTime(0.06, now);
-        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.32);
+        gain.gain.setValueAtTime(0.095, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.36);
 
         src.connect(filter);
         filter.connect(gain);
         gain.connect(this.sfxBusGain);
         src.start(now);
-        src.stop(now + 0.34);
+        src.stop(now + 0.38);
       } catch {
         // Ignore
       }
     }
+  }
+
+  /**
+   * Plays a crisp, unmistakable futuristic arcade bonus / power-up box collection sound effect
+   * whenever the player collects a floating 3D bonus or weapon box on the track.
+   */
+  public playBonusPickup(bonusKind?: string) {
+    if (this.muted || this.sfxVolume <= 0.01) return;
+    const ctx = this.ensureContext();
+    if (!ctx || !this.sfxBusGain) return;
+    const now = ctx.currentTime;
+
+    this.playSfxSubImpact(138, now, 0.30, 0.13);
+
+    // Distinct bright ascending 4-note harmonic pickup fanfare
+    const arp =
+      bonusKind === 'weapon'
+        ? [392.0, 523.25, 659.25, 987.77] // G4 -> C5 -> E5 -> B5 tactical lock
+        : bonusKind === 'repair'
+        ? [349.23, 440.0, 523.25, 698.46] // Warm Fmaj7 hull restore chime
+        : bonusKind === 'credit'
+        ? [523.25, 659.25, 783.99, 1046.5] // Bright C5 -> E5 -> G5 -> C6 coin/token chime
+        : [440.0, 554.37, 659.25, 880.0]; // Euphoric Amaj triad power-up pickup chime
+
+    arp.forEach((f, idx) => {
+      this.playSfxNote(f, now + idx * 0.038, 0.36, 0.115, true, 'triangle');
+      // Shimmering upper harmonic bell layer
+      this.playSfxNote(f * 2, now + idx * 0.038 + 0.01, 0.24, 0.055, true, 'sine');
+    });
   }
 
   public playRingPass(chain: number, isOrange: boolean) {
@@ -1276,10 +1334,10 @@ class AeroAudioEngine {
     if (!ctx || !this.sfxBusGain) return;
     const now = ctx.currentTime;
 
-    this.playSfxSubImpact(125, now, 0.38, 0.12);
-    const notes = [293.66, 349.23, 440.0, 587.33, 880.0];
+    this.playSfxSubImpact(135, now, 0.42, 0.14);
+    const notes = [293.66, 369.99, 440.0, 587.33, 880.0];
     notes.forEach((f, idx) => {
-      this.playSfxNote(f, now + idx * 0.035, 0.45, 0.075, true);
+      this.playSfxNote(f, now + idx * 0.034, 0.46, 0.105, true);
     });
   }
 
@@ -1460,6 +1518,125 @@ class AeroAudioEngine {
         gain.connect(this.sfxBusGain);
         src.start(now);
         src.stop(now + 1.15);
+      } catch {
+        // Ignore
+      }
+    }
+  }
+
+  public playDistantThunder(intensity = 0.75) {
+    if (this.muted || this.sfxVolume <= 0.01) return;
+    const ctx = this.ensureContext();
+    if (!ctx || !this.sfxBusGain) return;
+    const now = ctx.currentTime;
+    const scale = Math.max(0.3, Math.min(1.2, intensity));
+
+    // Rolling multi-stage seismic sub-bass rumbles
+    this.playSfxSubImpact(68, now, 0.95, 0.22 * scale);
+    this.playSfxSubImpact(52, now + 0.24, 1.15, 0.25 * scale);
+    this.playSfxSubImpact(42, now + 0.62, 1.35, 0.2 * scale);
+
+    if (this.noiseBuffer) {
+      try {
+        const src = ctx.createBufferSource();
+        src.buffer = this.noiseBuffer;
+        src.loop = true;
+
+        const filter = ctx.createBiquadFilter();
+        filter.type = 'lowpass';
+        filter.Q.value = 2.4;
+        filter.frequency.setValueAtTime(190, now);
+        filter.frequency.linearRampToValueAtTime(310, now + 0.28);
+        filter.frequency.exponentialRampToValueAtTime(110, now + 0.75);
+        filter.frequency.linearRampToValueAtTime(220, now + 1.05);
+        filter.frequency.exponentialRampToValueAtTime(55, now + 2.1);
+
+        const gain = ctx.createGain();
+        gain.gain.setValueAtTime(0.001, now);
+        gain.gain.linearRampToValueAtTime(0.24 * scale, now + 0.22);
+        gain.gain.linearRampToValueAtTime(0.14 * scale, now + 0.65);
+        gain.gain.linearRampToValueAtTime(0.21 * scale, now + 0.98);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 2.15);
+
+        src.connect(filter);
+        filter.connect(gain);
+        gain.connect(this.sfxBusGain);
+        if (this.sfxDelay) {
+          gain.connect(this.sfxDelay);
+        }
+        src.start(now);
+        src.stop(now + 2.2);
+      } catch {
+        // Ignore
+      }
+    }
+  }
+
+  public playLightningStrike(intensity = 1.0) {
+    if (this.muted || this.sfxVolume <= 0.01) return;
+    const ctx = this.ensureContext();
+    if (!ctx || !this.sfxBusGain) return;
+    const now = ctx.currentTime;
+    const scale = Math.max(0.4, Math.min(1.3, intensity));
+
+    // 1. High-voltage electrostatic plasma crack & tearing sky arc
+    this.playSfxNote(1180, now, 0.09, 0.14 * scale, true, 'sawtooth');
+    this.playSfxNote(640, now + 0.03, 0.14, 0.13 * scale, true, 'square');
+    this.playSfxNote(290, now + 0.07, 0.28, 0.15 * scale, true, 'sawtooth');
+
+    // 2. Massive close-range thunderclap impact + rolling sub-bass tail
+    this.playSfxSubImpact(155, now + 0.02, 0.65, 0.28 * scale);
+    this.playSfxSubImpact(82, now + 0.14, 1.1, 0.26 * scale);
+    this.playSfxSubImpact(46, now + 0.45, 1.45, 0.22 * scale);
+
+    if (this.noiseBuffer) {
+      try {
+        // Sharp high-frequency lightning snap
+        const snapSrc = ctx.createBufferSource();
+        snapSrc.buffer = this.noiseBuffer;
+        const snapFilter = ctx.createBiquadFilter();
+        snapFilter.type = 'bandpass';
+        snapFilter.Q.value = 1.4;
+        snapFilter.frequency.setValueAtTime(2800, now);
+        snapFilter.frequency.exponentialRampToValueAtTime(380, now + 0.32);
+
+        const snapGain = ctx.createGain();
+        snapGain.gain.setValueAtTime(0.28 * scale, now);
+        snapGain.gain.exponentialRampToValueAtTime(0.001, now + 0.35);
+
+        snapSrc.connect(snapFilter);
+        snapFilter.connect(snapGain);
+        snapGain.connect(this.sfxBusGain);
+        if (this.sfxDelay) {
+          snapGain.connect(this.sfxDelay);
+        }
+        snapSrc.start(now);
+        snapSrc.stop(now + 0.36);
+
+        // Deep booming thunderclap body
+        const boomSrc = ctx.createBufferSource();
+        boomSrc.buffer = this.noiseBuffer;
+        boomSrc.loop = true;
+        const boomFilter = ctx.createBiquadFilter();
+        boomFilter.type = 'lowpass';
+        boomFilter.Q.value = 2.8;
+        boomFilter.frequency.setValueAtTime(680, now + 0.04);
+        boomFilter.frequency.exponentialRampToValueAtTime(160, now + 0.55);
+        boomFilter.frequency.linearRampToValueAtTime(260, now + 0.85);
+        boomFilter.frequency.exponentialRampToValueAtTime(52, now + 2.35);
+
+        const boomGain = ctx.createGain();
+        boomGain.gain.setValueAtTime(0.001, now);
+        boomGain.gain.linearRampToValueAtTime(0.3 * scale, now + 0.06);
+        boomGain.gain.linearRampToValueAtTime(0.18 * scale, now + 0.55);
+        boomGain.gain.linearRampToValueAtTime(0.22 * scale, now + 0.88);
+        boomGain.gain.exponentialRampToValueAtTime(0.001, now + 2.4);
+
+        boomSrc.connect(boomFilter);
+        boomFilter.connect(boomGain);
+        boomGain.connect(this.sfxBusGain);
+        boomSrc.start(now);
+        boomSrc.stop(now + 2.45);
       } catch {
         // Ignore
       }

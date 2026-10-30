@@ -299,9 +299,9 @@ export const SFX_PRESETS: Array<{
 export const DEFAULT_SETTINGS: GameSettings = {
   trackId: 'city',
   atmosphere: 'neon',
-  weatherMode: 'dynamic',
+  weatherMode: 'storm',
   shipId: 'valkyrie',
-  cameraMode: 'chase',
+  cameraMode: 'perspective',
   fov: 72,
   steerSensitivity: 1.0,
   aiDifficulty: 'professional',
@@ -312,8 +312,8 @@ export const DEFAULT_SETTINGS: GameSettings = {
   muted: false,
   showParticles: true,
   enableDynamicFov: true,
-  enableGForceTilt: true,
-  enableMotionLines: true,
+  enableGForceTilt: false,
+  enableMotionLines: false,
   enableTrackSsao: true,
   enableBloom: true,
   enableHeatHaze: true,
@@ -323,13 +323,14 @@ export const DEFAULT_SETTINGS: GameSettings = {
   enableTrackDebris: true,
   neonIntensity: 1.15,
   autoAccelerate: false,
+  gameSpeed: 1.25,
 };
 
 export const TRACK_HALF_WIDTH = 13.5;
 
 /**
- * Computes the current dynamic or locked weather state for a track.
- * Affects visual clarity (visibilityFactor / fog) and surface friction (surfaceGrip).
+ * Computes the current dynamic or storm weather state for a track.
+ * Evolves through storm cloud buildup, distant lightning, monsoon squalls, and supercell vortex phases.
  */
 export function computeWeatherState(
   trackId: TrackId,
@@ -343,15 +344,47 @@ export function computeWeatherState(
       label: 'CLEAR SKIES',
       surfaceGrip: 1.0,
       visibilityFactor: 1.0,
+      cloudDensity: 0.0,
+      stormPhase: 'clear',
     };
   }
 
+  const wave1 = Math.sin(elapsedSec * 0.14 + 0.65);
+  const wave2 = Math.cos(elapsedSec * 0.055);
+  const stormCycle = (elapsedSec % 48) / 48; // 48s evolving storm front cycle
+
   let intensity = 0.92;
-  if (weatherMode === 'dynamic') {
-    // Smoothly cycle between active squalls (0.45..0.95) and brief calmer windows (0.22..0.45)
-    const wave1 = Math.sin(elapsedSec * 0.14 + 0.65);
-    const wave2 = Math.cos(elapsedSec * 0.055);
-    intensity = Math.max(0.22, Math.min(0.96, 0.62 + wave1 * 0.24 + wave2 * 0.12));
+  let cloudDensity = 0.94;
+  let stormPhase: NonNullable<WeatherState['stormPhase']> = 'supercell_vortex';
+
+  if (weatherMode === 'storm') {
+    // Active storm mode (default on City circuit): dynamic squall surges (0.85..0.98) with evolving lightning/vortex phases
+    intensity = Number(
+      Math.max(0.85, Math.min(0.98, 0.91 + wave1 * 0.045 + wave2 * 0.025)).toFixed(3)
+    );
+    cloudDensity = Number(
+      Math.max(0.88, Math.min(1.0, 0.93 + Math.sin(elapsedSec * 0.09) * 0.06)).toFixed(3)
+    );
+    stormPhase =
+      stormCycle < 0.2
+        ? 'distant_lightning'
+        : stormCycle < 0.55
+        ? 'monsoon_squall'
+        : 'supercell_vortex';
+  } else if (weatherMode === 'dynamic') {
+    // Dynamic weather progression: gathering storm clouds -> distant lightning -> heavy monsoon squall -> supercell vortex
+    intensity = Number(
+      Math.max(0.26, Math.min(0.96, 0.64 + wave1 * 0.24 + wave2 * 0.12)).toFixed(3)
+    );
+    cloudDensity = Number(Math.max(0.42, Math.min(1.0, intensity * 1.08)).toFixed(3));
+    stormPhase =
+      intensity >= 0.82
+        ? 'supercell_vortex'
+        : intensity >= 0.65
+        ? 'monsoon_squall'
+        : intensity >= 0.44
+        ? 'distant_lightning'
+        : 'gathering_clouds';
   }
 
   const surfaceGrip = Number((1.0 - intensity * 0.42).toFixed(3));
@@ -359,17 +392,21 @@ export function computeWeatherState(
 
   if (isCityTrack(trackId)) {
     const label =
-      intensity >= 0.75
+      stormPhase === 'supercell_vortex'
+        ? 'STORM SUPERCELL // VORTEX'
+        : stormPhase === 'monsoon_squall' || intensity >= 0.75
         ? 'CYBER MONSOON // WET'
-        : intensity >= 0.42
+        : stormPhase === 'distant_lightning' || intensity >= 0.42
         ? 'NEON RAIN SQUALL'
-        : 'LIGHT MIST DRIZZLE';
+        : 'STORM CLOUDS GATHERING';
     return {
       type: 'rain',
       intensity,
       label,
       surfaceGrip,
       visibilityFactor,
+      cloudDensity,
+      stormPhase,
     };
   } else {
     const label =
@@ -384,6 +421,8 @@ export function computeWeatherState(
       label,
       surfaceGrip,
       visibilityFactor,
+      cloudDensity,
+      stormPhase,
     };
   }
 }
@@ -415,14 +454,14 @@ export interface PowerUpMetaSpec {
 export const POWERUP_META: Record<PowerUpItemType, PowerUpMetaSpec> = {
   boost: {
     id: 'boost',
-    label: 'BOOST',
-    shortLabel: 'BOOST RING',
+    label: 'VELOCITY BOOST PAD',
+    shortLabel: 'VELOCITY BOOST',
     description:
-      'A circular cyan energy ring that grants a short burst of acceleration when collected. Its bright inner glow and segmented casing make it easy to spot on the track.',
-    effectBadge: '+235 KM/H BURST',
-    color: '#00f2fe',
-    accentHex: 0x00f2fe,
-    glowHex: 0x38bdf8,
+      'A lane-wide electric-blue triple-arrow velocity pad embedded in the roadway that lights up in series and triggers a progressive combo velocity surge when chained.',
+    effectBadge: '+380 KM/H HYPER-BURST',
+    color: '#00e5ff',
+    accentHex: 0x00e5ff,
+    glowHex: 0x7dd3fc,
     spriteCol: 0,
     spriteRow: 0,
   },
@@ -659,16 +698,21 @@ export const DEFAULT_UPGRADES: VehicleUpgrades = {
 };
 
 /**
- * Generates well-spaced on-track Fixed Speed Boost pads and Respawning Bonus / Weapon squares
- * with lowered, balanced density for both City and Lava circuits:
- * - City ('city' | 'city_v1', 9,800m): 24 total pads (8 Fixed Speed Boost pads + 8 Power-Up Bonus squares + 8 Weapon squares)
- * - Lava ('lava_v2' | 'lava', 9,600m): 15 total pads (5 Fixed Speed Boost pads + 5 Power-Up Bonus squares + 5 Weapon squares)
+ * Generates chained series of on-track Fixed Velocity-Boost pads and Respawning 3D Bonus / Weapon boxes:
+ * - City ('city' | 'city_v1', 9,800m): 36 total pads (6 chained series × 3 consecutive Velocity-Boost pads = 18 Boost pads + 9 Power-Up Bonus boxes + 9 Weapon boxes)
+ * - Lava ('lava_v2' | 'lava', 9,600m): 25 total pads (5 chained series × 3 consecutive Velocity-Boost pads = 15 Boost pads + 5 Power-Up Bonus boxes + 5 Weapon boxes)
+ * Within each velocity-boost chain, 3 boost pads are placed along a smooth racing line (Δt = 0.020 apart)
+ * so a skilled driver can hit them one after another in series to stack velocity and proceed very quickly!
  * Fixed Speed Boost pads (`type === 'boost'`) stay permanently active on the track surface for all racers.
- * Bonus & Weapon squares (`type !== 'boost'`) disappear when collected by any racer and respawn after 10.0 seconds.
+ * Bonus & Weapon 3D boxes (`type !== 'boost'`) disappear when collected by any racer and respawn after 10.0 seconds.
  */
-export function createTrackPads(trackId: TrackId): TrackPad[] {
+export function createTrackPads(trackId: TrackId, enableLegacyPads = true): TrackPad[] {
+  if (!enableLegacyPads) {
+    return [];
+  }
   const pads: TrackPad[] = [];
-  const count = isCityTrack(trackId) ? 24 : 15;
+  const isCity = isCityTrack(trackId);
+  const sectorCount = isCity ? 6 : 5;
   const bonusBoxCycle: PowerUpItemType[] = [
     'nitro',
     'crystal',
@@ -682,54 +726,77 @@ export function createTrackPads(trackId: TrackId): TrackPad[] {
     'shockwave',
     'mines',
   ];
-  const lanePattern = [0.0, -0.46, 0.46, 0.0, 0.36, -0.36, 0.0, -0.28, 0.28];
+  // Smooth racing-line lane progressions for each 3-pad velocity-boost chain so skilled players can chain all 3 in series
+  const boostChainLines: ReadonlyArray< readonly [number, number, number] > = [
+    [0.0, 0.0, 0.0],
+    [-0.30, -0.15, 0.0],
+    [0.30, 0.15, 0.0],
+    [0.0, -0.18, -0.32],
+    [0.0, 0.18, 0.32],
+    [-0.24, 0.0, 0.24],
+  ];
+  const itemLanePattern = [-0.46, 0.46, 0.38, -0.38, -0.32, 0.32];
 
+  let padId = 0;
   let bonusIdx = 0;
   let weaponIdx = 0;
 
-  for (let i = 0; i < count; i++) {
-    const t = (i + 0.5) / count;
-    const laneOffset = lanePattern[i % lanePattern.length];
+  for (let s = 0; s < sectorCount; s++) {
+    // Sector base t starts at 0.058 so no pad sits on the starting grid (t = 0.002..0.035)
+    const sectorSpan = 0.895 / sectorCount;
+    const baseT = 0.058 + s * sectorSpan;
+    const chainLanes = boostChainLines[s % boostChainLines.length];
 
-    // Pattern of 3:
-    // - i % 3 === 0: Fixed Speed Boost Pad on the track surface (`type: 'boost', powerUpType: 'boost'`)
-    // - i % 3 === 1: Respawning Power-Up / Bonus Square (`nitro`, `crystal`, `shield`, `repair`, `credit`)
-    // - i % 3 === 2: Respawning Army / Weapon Square (`missile`, `laser`, `shockwave`, `mines`)
-    if (i % 3 === 0) {
+    // 1) Chained Series of 3 Consecutive Velocity-Boost Pads along the racing line (~195m apart)
+    for (let c = 0; c < 3; c++) {
+      const boostT = Number((baseT + c * 0.020).toFixed(4));
       pads.push({
-        id: i,
-        t,
-        laneOffset: i % 6 === 0 ? 0.0 : laneOffset * 0.65,
+        id: padId++,
+        t: boostT,
+        laneOffset: chainLanes[c],
         type: 'boost',
         powerUpType: 'boost',
       });
-    } else if (i % 3 === 1) {
-      const powerUpType = bonusBoxCycle[bonusIdx % bonusBoxCycle.length];
-      bonusIdx++;
-      const type: TrackPad['type'] = powerUpType === 'repair' ? 'recharge' : 'bonus';
-      pads.push({
-        id: i,
-        t,
-        laneOffset,
-        type,
-        powerUpType,
-      });
-    } else {
-      const weaponType = weaponCycle[weaponIdx % weaponCycle.length];
-      weaponIdx++;
-      pads.push({
-        id: i,
-        t,
-        laneOffset,
-        type: 'weapon',
-        weaponType,
-      });
+    }
+
+    // 2) Respawning 3D Floating Bonus & Weapon Boxes in the second half of the sector
+    const itemSlots = isCity ? 3 : 2;
+    for (let k = 0; k < itemSlots; k++) {
+      const itemT = Number((baseT + 0.068 + k * (isCity ? 0.024 : 0.034)).toFixed(4));
+      const laneOffset = itemLanePattern[(s * itemSlots + k) % itemLanePattern.length];
+      const isBonusSlot = (s + k) % 2 === 0;
+
+      if (isBonusSlot) {
+        const powerUpType = bonusBoxCycle[bonusIdx % bonusBoxCycle.length];
+        bonusIdx++;
+        const type: TrackPad['type'] = powerUpType === 'repair' ? 'recharge' : 'bonus';
+        pads.push({
+          id: padId++,
+          t: itemT,
+          laneOffset,
+          type,
+          powerUpType,
+        });
+      } else {
+        const weaponType = weaponCycle[weaponIdx % weaponCycle.length];
+        weaponIdx++;
+        pads.push({
+          id: padId++,
+          t: itemT,
+          laneOffset,
+          type: 'weapon',
+          weaponType,
+        });
+      }
     }
   }
   return pads;
 }
 
-export function createEnergyRings(trackId: TrackId): EnergyRing[] {
+export function createEnergyRings(trackId: TrackId, enableLegacyRings = false): EnergyRing[] {
+  if (!enableLegacyRings) {
+    return [];
+  }
   const rings: EnergyRing[] = [];
   const count = isCityTrack(trackId) ? 14 : 14;
   for (let i = 0; i < count; i++) {
@@ -831,6 +898,12 @@ export function estimateTrackCurvature(trackId: TrackId, t: number): number {
   const pts = isCityTrack(trackId) ? CITY_CURVATURE_ANCHORS : LAVA_CURVATURE_ANCHORS;
   const n = pts.length;
   const normT = ((t % 1) + 1) % 1;
+
+  // Start/finish straightaway envelope (t near 0.0 / 1.0 is the straight starting grid)
+  if (normT < 0.025 || normT > 0.975) {
+    return 0;
+  }
+
   const exactIdx = normT * n;
   const i0 = Math.floor(exactIdx) % n;
   const iPrev = (i0 - 1 + n) % n;
@@ -852,7 +925,11 @@ export function estimateTrackCurvature(trackId: TrackId, t: number): number {
 
   const c0 = sampleHeadingChange(iPrev, i0, iNext);
   const c1 = sampleHeadingChange(i0, iNext, iNext2);
-  return c0 + (c1 - c0) * frac;
+  const raw = c0 + (c1 - c0) * frac;
+  // Smooth deadzone for tiny spline anchor kinks (< 0.06) so straightaways track true with zero step-jump
+  const absRaw = Math.abs(raw);
+  if (absRaw < 0.06) return 0;
+  return Math.sign(raw) * ((absRaw - 0.06) / 0.94);
 }
 
 export function createInitialRacers(playerShipId: ShipId): RacerState[] {
@@ -866,10 +943,10 @@ export function createInitialRacers(playerShipId: ShipId): RacerState[] {
 
   const racers: RacerState[] = [];
 
-  // Racers 1..3 ahead on grid (visible ahead on the sweeping curve!)
+  // Racers 1..3 ahead on grid in outer lanes so the center lane (0.0m) is completely clear for the player
   for (let i = 0; i < 3; i++) {
     const startT = 0.018 - i * 0.0045;
-    const lane = i === 0 ? -4.2 : i === 1 ? 5.6 : -6.4;
+    const lane = i === 0 ? -6.2 : i === 1 ? 6.2 : -8.4;
     racers.push({
       id: `ai-${i}`,
       name: aiNames[i].name,
@@ -882,7 +959,7 @@ export function createInitialRacers(playerShipId: ShipId): RacerState[] {
       lateralVelocity: 0,
       speedKmh: 0,
       energy: 100,
-      nitroReserve: 30,
+      nitroReserve: 0,
       crystalPoints: 0,
       crystalUpgradeLevel: 0,
       creditsEarned: 0,
@@ -898,6 +975,9 @@ export function createInitialRacers(playerShipId: ShipId): RacerState[] {
       yawOffset: 0,
       ringChain: 0,
       ringChainTimer: 0,
+      boostComboCount: 0,
+      boostComboTimer: 0,
+      lastBoostPadId: null,
       heldBonus: 'none',
       heldWeapon: 'none',
       laserActiveTimer: 0,
@@ -916,7 +996,7 @@ export function createInitialRacers(playerShipId: ShipId): RacerState[] {
     });
   }
 
-  // Player in 4th position on the starting grid (empty item slots ready to collect on track)
+  // Player in 4th position on the starting grid, positioned in the EXACT CENTER of the track (lateralOffset: 0)
   racers.push({
     id: 'player',
     name: SHIP_SPECS[playerShipId].name,
@@ -925,11 +1005,11 @@ export function createInitialRacers(playerShipId: ShipId): RacerState[] {
     t: 0.002,
     lap: 1,
     totalProgress: 0.002,
-    lateralOffset: 2.2,
+    lateralOffset: 0,
     lateralVelocity: 0,
     speedKmh: 0,
     energy: 100,
-    nitroReserve: 35,
+    nitroReserve: 0,
     crystalPoints: 0,
     crystalUpgradeLevel: 0,
     creditsEarned: 0,
@@ -945,6 +1025,9 @@ export function createInitialRacers(playerShipId: ShipId): RacerState[] {
     yawOffset: 0,
     ringChain: 0,
     ringChainTimer: 0,
+    boostComboCount: 0,
+    boostComboTimer: 0,
+    lastBoostPadId: null,
     heldBonus: 'none',
     heldWeapon: 'none',
     laserActiveTimer: 0,
@@ -979,7 +1062,7 @@ export function createInitialRacers(playerShipId: ShipId): RacerState[] {
       lateralVelocity: 0,
       speedKmh: 0,
       energy: 100,
-      nitroReserve: 30,
+      nitroReserve: 0,
       crystalPoints: 0,
       crystalUpgradeLevel: 0,
       creditsEarned: 0,
@@ -995,6 +1078,9 @@ export function createInitialRacers(playerShipId: ShipId): RacerState[] {
       yawOffset: 0,
       ringChain: 0,
       ringChainTimer: 0,
+      boostComboCount: 0,
+      boostComboTimer: 0,
+      lastBoostPadId: null,
       heldBonus: 'none',
       heldWeapon: 'none',
       laserActiveTimer: 0,
@@ -1030,6 +1116,7 @@ export interface PlayerInputState {
 
 export interface StepRacerResult {
   hitBoostPad: boolean;
+  boostComboCount?: number;
   hitRechargePad: boolean;
   collectedBonus: BonusType | null;
   collectedPowerUp: PowerUpItemType | null;
@@ -1042,6 +1129,102 @@ export interface StepRacerResult {
   exploded: boolean;
   completedLap: boolean;
   raceFinished: boolean;
+}
+
+export interface BoundaryCollisionResult {
+  wallCollision: boolean;
+  envStructureHit: boolean;
+  clampedOffset: number;
+}
+
+/**
+ * Evaluates whether a track coordinate `t` lies inside a trackside 3D environment structure
+ * (timing gantry pillars, advertising gantry arches, skyscraper core tunnel, volcano tunnel, or refinery portal).
+ */
+export function isWithinEnvironmentStructureZone(trackId: TrackId, tNorm: number): boolean {
+  const t = ((tNorm % 1) + 1) % 1;
+  // Timing & sector gantries present on all tracks
+  const sectorTs = [0.0, 0.25, 0.5, 0.75];
+  for (const st of sectorTs) {
+    const distT = Math.min(Math.abs(t - st), 1 - Math.abs(t - st));
+    if (distT <= 0.0045) return true;
+  }
+  if (trackId === 'city') {
+    // Advertising gantry arches & Skyscraper Core / Neon Overpass tunnel zones
+    const cityGantryTs = [0.042, 0.145, 0.275, 0.395, 0.51, 0.635, 0.855, 0.945];
+    for (const gt of cityGantryTs) {
+      if (Math.abs(t - gt) <= 0.0045) return true;
+    }
+    if (t >= 0.705 && t <= 0.805) return true;
+  } else if (trackId === 'lava') {
+    // Volcano Tunnel & Magma Refinery Portal zones
+    if ((t >= 0.136 && t <= 0.182) || (t >= 0.745 && t <= 0.798)) return true;
+  }
+  return false;
+}
+
+/**
+ * Enforces physical track boundary and 3D environment mesh collision physics so vehicles
+ * never clip through guardrails, tunnel walls, gantry pillars, or trackside structures.
+ */
+export function resolveTrackBoundaryAndEnvironmentCollision(
+  racer: RacerState,
+  trackId: TrackId,
+  combinedSteer: number,
+  hullProtection = 1.0,
+  dt = 1 / 60,
+  customClearanceHalfWidth?: number
+): BoundaryCollisionResult {
+  // Full 27m roadway clearance (-12.15m to +12.15m center offset; ship outer wingtips reach ±14.67m inside ±14.75m walls)
+  const maxOffset =
+    customClearanceHalfWidth !== undefined ? customClearanceHalfWidth : TRACK_HALF_WIDTH - 1.35;
+  const inEnvZone = isWithinEnvironmentStructureZone(trackId, racer.t);
+
+  if (Math.abs(racer.lateralOffset) > maxOffset) {
+    const wallSide = Math.sign(racer.lateralOffset) || 1;
+    const impactSpeedRatio = Math.max(0.35, Math.min(1.4, racer.speedKmh / 760));
+    const latImpactVel = Math.abs(racer.lateralVelocity);
+
+    // Keep vehicle cleanly inside the guardrail/environment boundary without pinballing back to center
+    racer.lateralOffset = wallSide * (maxOffset - 0.02);
+    const steeringIntoWall = Math.sign(combinedSteer) === wallSide;
+    const reboundFactor = inEnvZone ? 0.24 : 0.15;
+    racer.lateralVelocity = steeringIntoWall
+      ? 0
+      : -wallSide * Math.min(2.2, Math.max(0.35, latImpactVel * reboundFactor));
+
+    // Time-scaled wall/structure friction and deflection
+    const wallDragDecel = racer.shieldTimer > 0 ? 14 : inEnvZone ? 92 : 78;
+    racer.speedKmh = Math.max(0, racer.speedKmh - wallDragDecel * dt);
+    racer.yawOffset *= 0.45;
+    racer.rollAngle = -wallSide * 0.18;
+
+    if (racer.shieldTimer <= 0 && racer.speedKmh > 40) {
+      if (racer.wallHitCooldown <= 0) {
+        const structMult = inEnvZone ? 1.15 : 1.0;
+        const impactDmg =
+          (6.5 + impactSpeedRatio * 4.2 + Math.min(3.0, latImpactVel * 0.12)) *
+          hullProtection *
+          structMult;
+        racer.energy = Math.max(0, racer.energy - impactDmg);
+        racer.wallHitCooldown = 0.65;
+        racer.hitFlashTimer = 0.3;
+      }
+      racer.energy = Math.max(0, racer.energy - 8.5 * hullProtection * dt);
+    }
+
+    return {
+      wallCollision: true,
+      envStructureHit: inEnvZone,
+      clampedOffset: racer.lateralOffset,
+    };
+  }
+
+  return {
+    wallCollision: false,
+    envStructureHit: false,
+    clampedOffset: racer.lateralOffset,
+  };
 }
 
 /**
@@ -1150,6 +1333,13 @@ export function stepRacerPhysics(
       racer.ringChain = 0;
     }
   }
+  if ((racer.boostComboTimer ?? 0) > 0) {
+    racer.boostComboTimer = Math.max(0, (racer.boostComboTimer ?? 0) - dt);
+    if (racer.boostComboTimer === 0) {
+      racer.boostComboCount = 0;
+      racer.lastBoostPadId = null;
+    }
+  }
 
   // Fire Held Weapon when pressing [Z] (useWeaponPressed)
   if (input.useWeaponPressed && racer.heldWeapon !== 'none') {
@@ -1245,15 +1435,20 @@ export function stepRacerPhysics(
   const aiProfile = !racer.isPlayer ? getAiDifficultyProfile(settings.aiDifficulty) : null;
   const aiSpeedMult = aiProfile ? aiProfile.speedFactor : 1.0;
   const aiAccelMult = aiProfile ? aiProfile.accelFactor : 1.0;
+  const gameSpeedMult = Math.max(0.5, Math.min(2.5, settings.gameSpeed ?? 1.0));
 
   // Calculate effective max speed (with Ring Chain bonus, Crystal Upgrade bonus, Equipment Upgrade bonus, and boost)
   const chainSpeedBonus = racer.ringChain * 22; // Up to +110 KM/H at x5 chain
   const crystalSpeedBonus = racer.crystalUpgradeLevel * 12; // Up to +60 KM/H at Lv.5
   const equipSpeedBonus = racer.isPlayer ? upg.topSpeedLevel * 14 : 0;
   const equipBoostBonus = racer.isPlayer ? upg.nitroCapacityLevel * 14 : 0;
-  const nitroActiveBonus = racer.nitroTimer > 0 ? 60 : 0;
+  const nitroActiveBonus = racer.nitroTimer > 0 ? 75 : 0;
+  // Chained Hyper-Boost Pads (boostTimer > 1.2s) grant a progressive series combo top-end overcharge
+  const activeCombo = Math.max(0, racer.boostComboCount ?? 0);
+  const hyperPadBonus =
+    racer.boostTimer > 1.2 ? 235 + Math.max(0, activeCombo - 1) * 45 : 0;
   const boostSpeedBonus = racer.isBoosting
-    ? spec.boostPower + equipBoostBonus + nitroActiveBonus
+    ? spec.boostPower + equipBoostBonus + nitroActiveBonus + hyperPadBonus
     : 0;
   const empPenalty = racer.empSlowTimer > 0 && racer.shieldTimer <= 0 ? 0.65 : 1.0;
   const stormDragFactor = 1.0 - weatherIntensity * 0.035;
@@ -1282,17 +1477,17 @@ export function stepRacerPhysics(
   } else if (wantsDrivePower) {
     const speedRatio = Math.max(0, Math.min(1.25, racer.speedKmh / Math.max(1, baseCruiseSpeed)));
     // Progressive torque envelope:
-    // - 0.00..0.22 (0..~175 KM/H): Responsive, progressive launch traction from a standstill (0.72 -> 0.96)
-    // - 0.22..0.65 (~175..~510 KM/H): Strong mid-range turbine pull (0.96 -> 1.04)
-    // - 0.65..1.00 (~510..maxSpeed): Gradual aerodynamic taper (1.04 -> 0.36) so top speed is earned progressively
+    // - 0.00..0.22 (0..~175 KM/H): Responsive, progressive launch traction from a standstill (0.76 -> 1.02)
+    // - 0.22..0.65 (~175..~510 KM/H): Strong mid-range turbine pull (1.02 -> 1.12)
+    // - 0.65..1.00 (~510..maxSpeed): Gradual aerodynamic taper (1.12 -> 0.42) so top speed is earned progressively
     let progressiveBandMult = 1.0;
     if (speedRatio < 0.22) {
-      progressiveBandMult = 0.72 + (speedRatio / 0.22) * 0.24;
+      progressiveBandMult = 0.76 + (speedRatio / 0.22) * 0.26;
     } else if (speedRatio < 0.65) {
-      progressiveBandMult = 0.96 + ((speedRatio - 0.22) / 0.43) * 0.08;
+      progressiveBandMult = 1.02 + ((speedRatio - 0.22) / 0.43) * 0.10;
     } else {
       const highFrac = Math.min(1.0, (speedRatio - 0.65) / 0.35);
-      progressiveBandMult = 1.04 - highFrac * 0.68;
+      progressiveBandMult = 1.12 - highFrac * 0.70;
     }
 
     const baseAccelRate =
@@ -1301,9 +1496,10 @@ export function stepRacerPhysics(
       aiAccelMult *
       (0.88 + 0.12 * surfaceGrip);
 
-    // Progressive Boost / Nitro thrust surge on top of standard turbine acceleration
+    // Progressive Boost / Nitro / Hyper-Pad thrust surge on top of standard turbine acceleration
     const boostThrustBonus = racer.isBoosting
-      ? (spec.boostPower * 1.15 + (racer.nitroTimer > 0 ? 75 : 0)) * aiAccelMult
+      ? (spec.boostPower * 1.25 + (racer.nitroTimer > 0 ? 85 : 0) + (racer.boostTimer > 1.2 ? 220 : 0)) *
+        aiAccelMult
       : 0;
 
     const totalAccelRate = baseAccelRate + boostThrustBonus;
@@ -1327,19 +1523,24 @@ export function stepRacerPhysics(
     racer.speedKmh = Math.max(240, racer.speedKmh - airbrakeDrag * dt);
   }
 
-  // Absolute aerodynamic ceiling so stacked pads/modules stay controllable
-  racer.speedKmh = Math.min(1180, racer.speedKmh);
+  // Aerodynamic ceiling: 1180 KM/H under normal/manual boost; up to 1420..1520 KM/H when chaining strategic boost pads in series
+  const comboCeilingBonus = Math.max(0, (racer.boostComboCount ?? 1) - 1) * 35;
+  const aeroCeiling =
+    racer.boostTimer > 1.2 || racer.nitroTimer > 0
+      ? Math.min(1520, 1420 + comboCeilingBonus)
+      : 1180;
+  racer.speedKmh = Math.min(aeroCeiling, racer.speedKmh);
 
-  // Full-Roadway Direct Velocity-Targeted Steering & Cornering Physics:
-  // Players steer across the entire 27m roadway width (-11.85m to +11.85m across all 4 lanes)
-  // with immediate turn-in response and crisp lane-lock when releasing the steering key (no slippery wall pinballing).
+  // Classic Car Driving & Smooth Full-Roadway Lateral Drifting Physics:
+  // Zero spline-rail constraints: the vehicle starts in the center of the track (0.0m)
+  // and can smoothly steer and drift across the entire 27m roadway (-12.13m to +12.13m, guardrail to guardrail).
   let steerDir = 0;
   if (input.steerLeft) steerDir -= 1;
   if (input.steerRight) steerDir += 1;
 
   let airbrakeDir = 0;
-  if (input.airbrakeLeft) airbrakeDir -= 0.45;
-  if (input.airbrakeRight) airbrakeDir += 0.45;
+  if (input.airbrakeLeft) airbrakeDir -= 0.52;
+  if (input.airbrakeRight) airbrakeDir += 0.52;
 
   const combinedSteer = steerDir + airbrakeDir;
   const sensitivity = racer.isPlayer ? settings.steerSensitivity : 1.0;
@@ -1347,103 +1548,104 @@ export function stepRacerPhysics(
     1.0 +
     racer.crystalUpgradeLevel * 0.025 +
     (racer.isPlayer ? upg.handlingLevel * 0.035 : 0);
-  const gripSteerFactor = 0.85 + 0.15 * surfaceGrip;
-  // Trail-braking or feathering throttle increases front-end turn-in bite
-  const trailBrakeTurnInBonus = input.brake ? 1.16 : !isAccelerating ? 1.06 : 1.0;
+  const gripSteerFactor = 0.86 + 0.14 * surfaceGrip;
+  // Trail-braking or feathering throttle or holding airbrakes increases front-end turn-in bite and drift angle
+  const isDrifting =
+    Math.abs(airbrakeDir) > 0 ||
+    (Math.abs(steerDir) > 0 && (input.brake || Math.abs(racer.lateralVelocity) > 10.5));
+  const trailBrakeTurnInBonus = input.brake
+    ? 1.24
+    : Math.abs(airbrakeDir) > 0
+    ? 1.16
+    : !isAccelerating
+    ? 1.08
+    : 1.0;
 
-  // Forward speed scaling so steering works smoothly at low speed and reaches full authority at racing speed
-  const speedSteerScale =
-    racer.speedKmh > 2 ? Math.min(1.05, 0.42 + (racer.speedKmh / 420) * 0.63) : 0;
+  // Responsive steering authority across all speed bands so the ship can smoothly carve and drift across the entire roadway
+  const speedSteerScale = racer.isPlayer
+    ? 1.0
+    : racer.speedKmh > 2
+    ? Math.min(1.08, 0.62 + (racer.speedKmh / 380) * 0.46)
+    : 0.62;
   const maxLateralSpeed =
-    21.8 *
-    (0.72 + 0.28 * spec.handling) *
+    (racer.isPlayer ? 30.0 : 28.0) *
+    (0.75 + 0.25 * spec.handling) *
     handlingUpgradeMult *
     sensitivity *
     gripSteerFactor *
     trailBrakeTurnInBonus *
     speedSteerScale;
 
-  // Bounded curvature-induced centrifugal drift on corners:
-  // Gently drifts an unsteered vehicle outward on curves so it never feels locked to a center rail,
-  // while remaining bounded (~1.5..3.8 m/s) so it never yanks the player uncontrollably into guardrails.
+  // Classic Car Cornering Inertia (Centrifugal Outward Drift on High-Speed Curves):
+  // Only active when moving at speed (> 120 KM/H) on curved sections.
   const signedCurvature = estimateTrackCurvature(settings.trackId, racer.t);
-  const cornerSpeedNorm = Math.min(1.25, racer.speedKmh / 620);
+  const cornerSpeedNorm =
+    racer.speedKmh > 120 ? Math.min(1.35, (racer.speedKmh - 120) / 500) : 0;
+  const curvePullStrength = racer.isPlayer ? 6.2 : 3.8;
   const centrifugalDriftVel =
     (-signedCurvature *
       cornerSpeedNorm *
-      (0.38 + 0.62 * cornerSpeedNorm) *
-      (racer.isPlayer ? 4.2 : 3.2)) /
+      (0.42 + 0.58 * cornerSpeedNorm) *
+      curvePullStrength) /
     Math.max(0.85, spec.handling * 0.92);
 
   if (combinedSteer !== 0) {
-    // Active steering command: smoothly & rapidly converge lateralVelocity to the commanded lane-change speed
-    const targetLateralVel = combinedSteer * maxLateralSpeed + centrifugalDriftVel * 0.25;
+    // Active steering command: smooth, high-authority lateral drift velocity across the entire track width
+    const targetLateralVel =
+      combinedSteer * maxLateralSpeed + (racer.isPlayer ? 0 : centrifugalDriftVel * 0.25);
     const isCounterSteering =
       racer.lateralVelocity !== 0 &&
       Math.sign(combinedSteer) !== Math.sign(racer.lateralVelocity);
-    const steerResponseRate = (isCounterSteering ? 22.0 : 16.5) + 4.5 * surfaceGrip;
+    const steerResponseRate = (isCounterSteering ? 27.0 : 20.5) + 4.5 * surfaceGrip;
     racer.lateralVelocity +=
       (targetLateralVel - racer.lateralVelocity) * (1 - Math.exp(-steerResponseRate * dt));
   } else {
-    // Steering released: decay existing lateral slide rapidly (surfaceGrip-dependent) toward natural corner drift
-    const releaseDecayRate = 6.2 + 5.8 * surfaceGrip;
+    // Steering released: preserve a controlled ~1.7m lateral drift glide before settling in the chosen lane
+    // (never snapping back to center); on high-speed curves, experience natural outward cornering drift.
+    const releaseDecayRate = 11.0 + 6.5 * surfaceGrip;
     const decayFactor = Math.exp(-releaseDecayRate * dt);
     racer.lateralVelocity =
       racer.lateralVelocity * decayFactor + centrifugalDriftVel * (1 - decayFactor);
+    if (Math.abs(racer.lateralVelocity) < 0.04 && Math.abs(centrifugalDriftVel) < 0.04) {
+      racer.lateralVelocity = 0;
+    }
   }
   racer.lateralOffset += racer.lateralVelocity * dt;
 
-  // Track Edge & Guardrail Collision / Scraping Detection:
-  // Full playable roadway spans from -11.85m to +11.85m (23.7m of free lateral travel across the 27m road deck).
-  // Touching the outer guardrails smoothly slides along the barrier and decreases vehicle energy (unless Shield is active).
-  const maxOffset = TRACK_HALF_WIDTH - 1.65; // 11.85m on 13.5m half-width road
-
-  const driftSlipFactor = 1.0 + (1.0 - surfaceGrip) * 0.35;
+  const driftSlipFactor = (1.0 + (1.0 - surfaceGrip) * 0.35) * (isDrifting ? 1.12 : 1.0);
   let targetRoll = Math.max(
-    -0.52,
-    Math.min(0.52, -combinedSteer * 0.38 - signedCurvature * cornerSpeedNorm * 0.1)
+    -0.56,
+    Math.min(
+      0.56,
+      -combinedSteer * 0.39 -
+        racer.lateralVelocity * 0.0035 -
+        signedCurvature * cornerSpeedNorm * 0.12
+    )
   );
   let targetYaw = Math.max(
-    -0.44,
+    -0.56,
     Math.min(
-      0.44,
-      (-combinedSteer * 0.22 - airbrakeDir * 0.14 - racer.lateralVelocity * 0.0035) * driftSlipFactor
+      0.56,
+      (-combinedSteer * 0.34 - airbrakeDir * 0.18 - racer.lateralVelocity * 0.0062) * driftSlipFactor
     )
   );
 
-  if (Math.abs(racer.lateralOffset) > maxOffset) {
+  const hullProtection = racer.isPlayer ? 1.0 - upg.shieldHullLevel * 0.08 : 1.0;
+  const boundaryHit = resolveTrackBoundaryAndEnvironmentCollision(
+    racer,
+    settings.trackId,
+    combinedSteer,
+    hullProtection,
+    dt
+  );
+  if (boundaryHit.wallCollision) {
     const wallSide = Math.sign(racer.lateralOffset) || 1;
-    const impactSpeedRatio = Math.max(0.35, Math.min(1.4, racer.speedKmh / 760));
-    const latImpactVel = Math.abs(racer.lateralVelocity);
-    // Keep vehicle cleanly at the outer lane edge without bouncing/pinballing back across the track
-    racer.lateralOffset = wallSide * (maxOffset - 0.02);
-    const steeringIntoWall = Math.sign(combinedSteer) === wallSide;
-    racer.lateralVelocity = steeringIntoWall ? 0 : -wallSide * Math.min(1.4, latImpactVel * 0.15);
-
-    // Time-scaled wall friction (instead of harsh per-frame multiplier) so scraping a barrier stays playable
-    const wallDragDecel = racer.shieldTimer > 0 ? 14 : 72;
-    racer.speedKmh = Math.max(0, racer.speedKmh - wallDragDecel * dt);
-    racer.yawOffset *= 0.5;
-    racer.rollAngle = -wallSide * 0.18;
     targetRoll = -wallSide * 0.18;
     targetYaw = -wallSide * 0.04;
-
-    if (racer.shieldTimer <= 0 && racer.speedKmh > 40) {
-      const hullProtection = racer.isPlayer ? 1.0 - upg.shieldHullLevel * 0.08 : 1.0;
-      if (racer.wallHitCooldown <= 0) {
-        const impactDmg =
-          (6.5 + impactSpeedRatio * 4.2 + Math.min(3.0, latImpactVel * 0.12)) * hullProtection;
-        racer.energy = Math.max(0, racer.energy - impactDmg);
-        racer.wallHitCooldown = 0.65;
-        racer.hitFlashTimer = 0.3;
-      }
-      // Sustained guardrail scraping drain
-      racer.energy = Math.max(0, racer.energy - 8.5 * hullProtection * dt);
-    }
     result.wallCollision = true;
   }
 
-  // Check if energy reached zero from guardrail / edge damage -> Vehicle Explodes!
+  // Check if energy reached zero from guardrail / environment collision damage -> Vehicle Explodes!
   if (racer.energy <= 0) {
     racer.energy = 0;
     racer.isDestroyed = true;
@@ -1454,14 +1656,21 @@ export function stepRacerPhysics(
     return result;
   }
 
-  racer.rollAngle += (targetRoll - racer.rollAngle) * (1 - Math.exp(-10 * dt));
-  racer.yawOffset += (targetYaw - racer.yawOffset) * (1 - Math.exp(-10 * dt));
+  racer.rollAngle += (targetRoll - racer.rollAngle) * (1 - Math.exp(-11.5 * dt));
+  racer.yawOffset += (targetYaw - racer.yawOffset) * (1 - Math.exp(-11.5 * dt));
+  if (combinedSteer === 0 && Math.abs(targetRoll) < 0.002 && Math.abs(racer.rollAngle) < 0.002) {
+    racer.rollAngle = 0;
+  }
+  if (combinedSteer === 0 && Math.abs(targetYaw) < 0.002 && Math.abs(racer.yawOffset) < 0.002) {
+    racer.yawOffset = 0;
+  }
   const targetPitch = racer.isBoosting ? 0.045 : input.brake ? -0.035 : isAccelerating ? 0.015 : -0.015;
   racer.pitchAngle += (targetPitch - racer.pitchAngle) * (1 - Math.exp(-8 * dt));
 
-  // Advance along spline
+  // Advance along spline with significantly higher real physical ground velocity (scaled by settings.gameSpeed)
   const prevT = racer.t;
-  const worldMetersPerSec = (racer.speedKmh / 3.6) * 0.48;
+  const headingForwardCos = Math.max(0.45, Math.cos(racer.yawOffset * 0.85));
+  const worldMetersPerSec = (racer.speedKmh / 3.6) * 0.76 * gameSpeedMult * headingForwardCos;
   const deltaT = (worldMetersPerSec * dt) / trackLengthMeters;
   const nextTUnwrapped = prevT + deltaT;
   if (deltaT > 0) {
@@ -1480,30 +1689,65 @@ export function stepRacerPhysics(
       continue;
     }
 
-    if (didCrossSplinePoint(prevT, nextTUnwrapped, pad.t)) {
+    const crossedCenter = didCrossSplinePoint(prevT, nextTUnwrapped, pad.t);
+    // Larger lane-wide electric-blue velocity-boost pads (9.2m wide x 18.4m long) trigger across their full span
+    const padHalfLenT = isFixedBoostPad ? 9.2 / Math.max(1000, trackLengthMeters) : 0;
+    const rawDeltaT = Math.abs(((racer.t - pad.t + 0.5) % 1 + 1) % 1 - 0.5);
+    const insideLongitudinalPad = isFixedBoostPad && rawDeltaT <= padHalfLenT;
+
+    // Clear lastBoostPadId once the racer has moved well past that pad so it can be triggered on the next lap
+    if (isFixedBoostPad && racer.lastBoostPadId === pad.id && rawDeltaT > padHalfLenT * 2.5 && !crossedCenter) {
+      racer.lastBoostPadId = null;
+    }
+
+    if (crossedCenter || insideLongitudinalPad) {
       const padWorldX = pad.laneOffset * (TRACK_HALF_WIDTH - 2.2);
-      if (Math.abs(racer.lateralOffset - padWorldX) < 3.85) {
+      // Generous full-lane lateral capture radius for the larger electric-blue velocity-boost pads (6.45m) and 4.45m for 3D weapon/bonus boxes
+      const hitRadius = isFixedBoostPad ? 6.45 : 4.45;
+      if (Math.abs(racer.lateralOffset - padWorldX) < hitRadius) {
         if (isFixedBoostPad) {
           // Only trigger boost pad surge if the racer is actively driving or coasting above 25 KM/H
           if (racer.isPlayer && !wantsDrivePower && racer.speedKmh < 25) {
             continue;
           }
-          // FIXED SPEED BOOST PAD ON TRACK:
-          // Always active for every racer who drives over it, triggers progressive boost acceleration,
-          // and never despawns (`collectedPadId` remains null).
-          racer.boostTimer = Math.max(racer.boostTimer, 1.65);
+          // If already on this exact pad from the previous frame, maintain boostTimer without double-counting the combo
+          if (racer.lastBoostPadId === pad.id) {
+            racer.boostTimer = Math.max(racer.boostTimer, 2.85);
+            continue;
+          }
+
+          // PROGRESSIVE SERIES COMBO BOOST PAD SYSTEM:
+          // Hitting boost pads one after another in series (Pad 1 -> Pad 2 -> Pad 3 -> ...) within the 6.5s combo window
+          // increments boostComboCount and rewards the player with progressively greater velocity surges and faster pad pulsation!
+          const prevCombo = (racer.boostComboTimer ?? 0) > 0 ? (racer.boostComboCount ?? 0) : 0;
+          const nextCombo = Math.min(6, prevCombo + 1);
+          racer.boostComboCount = nextCombo;
+          racer.boostComboTimer = 6.5;
+          racer.lastBoostPadId = pad.id;
+
+          racer.boostTimer = Math.min(
+            4.5,
+            Math.max(racer.boostTimer + 0.85, 2.75 + (nextCombo - 1) * 0.45)
+          );
           if (!racer.isPlayer || wantsDrivePower) {
+            const comboSurge = 235 + (nextCombo - 1) * 45;
+            const comboCapBonus = 280 + (nextCombo - 1) * 55;
+            const comboAeroMax = Math.min(1520, 1420 + (nextCombo - 1) * 35);
             racer.speedKmh = Math.min(
-              spec.maxSpeedKmh + spec.boostPower + 90,
-              racer.speedKmh + 52
+              comboAeroMax,
+              Math.min(
+                spec.maxSpeedKmh + spec.boostPower + comboCapBonus,
+                racer.speedKmh + comboSurge
+              )
             );
           }
-          racer.energy = Math.min(100, racer.energy + 6);
+          racer.energy = Math.min(100, racer.energy + 8 + Math.min(6, (nextCombo - 1) * 2));
           result.hitBoostPad = true;
+          result.boostComboCount = nextCombo;
           result.collectedPowerUp = 'boost';
           racer.lastCollectedPowerUp = 'boost';
           racer.lastCollectedWeapon = null;
-          racer.lastCollectedTimer = 2.0;
+          racer.lastCollectedTimer = 2.2;
           continue;
         }
 
@@ -1530,11 +1774,6 @@ export function stepRacerPhysics(
             ? 'repair'
             : POWERUP_ITEMS_ORDER[(pad.id + racer.lap) % POWERUP_ITEMS_ORDER.length]);
 
-        // Single-slot lock: if already holding an unconsumed power-up in heldBonus, cannot take another holdable box until used!
-        if (racer.heldBonus !== 'none' && pType !== 'repair' && pType !== 'credit') {
-          continue;
-        }
-
         result.collectedPowerUp = pType;
         result.collectedPadId = pad.id;
         racer.lastCollectedPowerUp = pType;
@@ -1553,28 +1792,22 @@ export function stepRacerPhysics(
           racer.crystalUpgradeLevel = Math.min(5, racer.crystalUpgradeLevel + 1);
           racer.energy = Math.min(100, racer.energy + 10);
           racer.boostTimer = Math.max(racer.boostTimer, 0.9);
-          if (racer.heldBonus === 'none') {
-            racer.heldBonus = 'crystal';
-            result.collectedBonus = 'crystal';
-          }
+          racer.heldBonus = 'crystal';
+          result.collectedBonus = 'crystal';
         } else if (pType === 'shield') {
           // SHIELD POWER-UP — Blue-violet orb with hexagonal energy grid activating temporary shield
           const shieldBonusDur = racer.isPlayer ? upg.shieldHullLevel * 0.5 : 0;
           racer.shieldTimer = Math.max(racer.shieldTimer, 5.5 + shieldBonusDur);
           racer.energy = Math.min(100, racer.energy + 14);
-          if (racer.heldBonus === 'none') {
-            racer.heldBonus = 'shield';
-            result.collectedBonus = 'shield';
-          }
+          racer.heldBonus = 'shield';
+          result.collectedBonus = 'shield';
         } else if (pType === 'repair') {
           // REPAIR POWER-UP — Dark-metal crate with cyan medical cross restoring vehicle health
           racer.energy = Math.min(100, racer.energy + 65);
           racer.empSlowTimer = 0;
           result.hitRechargePad = true;
-          if (racer.heldBonus === 'none') {
-            racer.heldBonus = 'repair';
-            result.collectedBonus = 'repair';
-          }
+          racer.heldBonus = 'repair';
+          result.collectedBonus = 'repair';
         } else if (pType === 'credit') {
           // CREDIT BONUS — Gold-edged token with raised central emblem earning credits for upgrades
           racer.creditsEarned += 150;
@@ -1583,10 +1816,8 @@ export function stepRacerPhysics(
             spec.maxSpeedKmh + spec.boostPower + 80,
             racer.speedKmh + 40
           );
-          if (racer.heldBonus === 'none') {
-            racer.heldBonus = 'credit';
-            result.collectedBonus = 'credit';
-          }
+          racer.heldBonus = 'credit';
+          result.collectedBonus = 'credit';
         }
       }
     }
@@ -2115,9 +2346,11 @@ export function resolveRacerCollisions(
         const massA = SHIP_SPECS[rA.shipId].energyCapacity / 100;
         const massB = SHIP_SPECS[rB.shipId].energyCapacity / 100;
         const totalMass = massA + massB;
-        // If one racer is a nearly stationary player (< 25 KM/H), do not push the stationary player forward along the track!
-        const rAStationaryPlayer = rA.isPlayer && rA.speedKmh < 25;
-        const rBStationaryPlayer = rB.isPlayer && rB.speedKmh < 25;
+        // If one racer is a nearly stationary player or launching on the starting straight, do not let AI cars shove or flicker the player!
+        const rAStationaryPlayer =
+          rA.isPlayer && (rA.speedKmh < 65 || (rA.lap === 1 && rA.t < 0.045));
+        const rBStationaryPlayer =
+          rB.isPlayer && (rB.speedKmh < 65 || (rB.lap === 1 && rB.t < 0.045));
         const weightA = rAStationaryPlayer ? 0 : rBStationaryPlayer ? 1 : massB / totalMass;
         const weightB = rBStationaryPlayer ? 0 : rAStationaryPlayer ? 1 : massA / totalMass;
 
@@ -2148,8 +2381,10 @@ export function resolveRacerCollisions(
             Math.min(maxOffset, rB.lateralOffset + pushDir * 0.45 * weightB)
           );
         } else {
-          let nextLatA = rA.lateralOffset - pushDir * (overlapLat * weightA + 0.14);
-          let nextLatB = rB.lateralOffset + pushDir * (overlapLat * weightB + 0.14);
+          const sepA = weightA > 0 ? overlapLat * weightA + 0.14 : 0;
+          const sepB = weightB > 0 ? overlapLat * weightB + 0.14 : 0;
+          let nextLatA = rA.lateralOffset - pushDir * sepA;
+          let nextLatB = rB.lateralOffset + pushDir * sepB;
 
           if (nextLatA < -maxOffset) {
             const deficit = -maxOffset - nextLatA;
@@ -2177,8 +2412,8 @@ export function resolveRacerCollisions(
 
         const relLatVel = Math.abs(rA.lateralVelocity - rB.lateralVelocity);
         const bounceSpeed = Math.max(7, Math.min(15, 7 + relLatVel * 0.35));
-        rA.lateralVelocity = -pushDir * bounceSpeed * weightA * (rA.isPlayer ? 0.35 : 1.15);
-        rB.lateralVelocity = pushDir * bounceSpeed * weightB * (rB.isPlayer ? 0.35 : 1.15);
+        rA.lateralVelocity = -pushDir * bounceSpeed * weightA * (rA.isPlayer ? 0.18 : 1.15);
+        rB.lateralVelocity = pushDir * bounceSpeed * weightB * (rB.isPlayer ? 0.18 : 1.15);
 
         rA.rollAngle = Math.max(-0.52, Math.min(0.52, rA.rollAngle + pushDir * 0.22 * weightA));
         rB.rollAngle = Math.max(-0.52, Math.min(0.52, rB.rollAngle - pushDir * 0.22 * weightB));
@@ -2384,7 +2619,9 @@ export function computeAiInput(
     }
   }
 
-  const diffOffset = targetLane - ai.lateralOffset;
+  // Derivative-damped lane tracking so AI / Demo autopilot settles smoothly into targetLane without oscillating left/right
+  const predictedLat = ai.lateralOffset + ai.lateralVelocity * 0.15;
+  const diffOffset = targetLane - predictedLat;
   const steerLeft = diffOffset < -profile.steerDeadzone;
   const steerRight = diffOffset > profile.steerDeadzone;
 

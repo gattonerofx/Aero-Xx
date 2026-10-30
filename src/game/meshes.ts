@@ -14,6 +14,7 @@ import {
   SHIP_SPECS,
   TRACK_HALF_WIDTH,
   WEAPON_META,
+  estimateTrackCurvature,
   isCityTrack,
 } from './rules';
 import { TrackTextureSet } from './textures';
@@ -1213,7 +1214,9 @@ export function createTrackSpline(trackId: TrackId): THREE.CatmullRomCurve3 {
       new THREE.Vector3(90, 22, 310),
       new THREE.Vector3(18, 26, 160),
     ];
-    return new THREE.CatmullRomCurve3(pts, true, 'catmullrom', 0.5);
+    const curve = new THREE.CatmullRomCurve3(pts, true, 'catmullrom', 0.5);
+    curve.arcLengthDivisions = 1600;
+    return curve;
   } else {
     // Extended Lava Circuit ("Caldera Prime Surge // Obsidian Rift MK-II" — 2.50x Baseline Length, 38 Control Points):
     // - Sector 1 (t = 0.00..0.21): Preserves the Start/Finish straight, starting grid, sweeping high-altitude
@@ -1271,11 +1274,14 @@ export function createTrackSpline(trackId: TrackId): THREE.CatmullRomCurve3 {
       new THREE.Vector3(115, 26, 285),
       new THREE.Vector3(22, 30, 155),
     ];
-    return new THREE.CatmullRomCurve3(pts, true, 'catmullrom', 0.5);
+    const curve = new THREE.CatmullRomCurve3(pts, true, 'catmullrom', 0.5);
+    curve.arcLengthDivisions = 1600;
+    return curve;
   }
 }
 
 const _tangent = new THREE.Vector3();
+const _aheadTan = new THREE.Vector3();
 const _up = new THREE.Vector3(0, 1, 0);
 const _binormal = new THREE.Vector3();
 const _normal = new THREE.Vector3();
@@ -1293,8 +1299,8 @@ export function sampleTrackFrame(
   spline.getTangentAt(normT, _tangent).normalize();
 
   const aheadT = (normT + 0.006) % 1;
-  const aheadTan = spline.getTangentAt(aheadT);
-  const turnRate = _tangent.x * aheadTan.z - _tangent.z * aheadTan.x;
+  spline.getTangentAt(aheadT, _aheadTan).normalize();
+  const turnRate = _tangent.x * _aheadTan.z - _tangent.z * _aheadTan.x;
   // Enhanced parabolic banking along the high-speed Parabolica (t ~ 0.05..0.36)
   // and the Extended Circuits' High-Speed Banked Sweepers (t ~ 0.56..0.76)
   const parabolicaBoost =
@@ -1366,7 +1372,7 @@ export interface BuiltTrackWorld {
 }
 
 /**
- * Custom GLSL Animated Plasma-Chevron Shader for On-Track Boost & Recharge Pads
+ * Custom GLSL Animated Plasma-Chevron Shader for On-Track Recharge Pads
  * Uses NormalBlending and polygonOffset so pads are crisp, saturated, and never cause whiteout or Z-fighting
  */
 function createPadShaderMaterial(
@@ -1419,6 +1425,477 @@ function createPadShaderMaterial(
     polygonOffset: true,
     polygonOffsetFactor: -4,
     polygonOffsetUnits: -4,
+    side: THREE.DoubleSide,
+  });
+}
+
+/**
+ * Unified Standard Electric-Blue 3-Arrow Boost Pad Shader (`gpt-image-2.5-sunburst_a_Remove_the_backgroun_fa8e5d5f.png`):
+ * - Used for ALL boost pads across ALL tracks (same size, same Electric Blue color).
+ * - Renders 3 crisp, frameless, closed-loop electric-blue chevrons (^ ^ ^) directly on the track surface
+ *   with ZERO rectangular background box:
+ *   1) Outer royal-blue / cobalt beveled border (#0044ff -> #0088ff) with 3D specular edge highlight
+ *   2) Continuous closed-loop white-cyan neon inner tube (#ffffff / #7df9ff) tracing all 6 edges of each chevron
+ *   3) Electric-cyan interior (#00c8ff -> #52faff) with fine geometric diamond/hexagonal carbon-mesh pattern
+ *      and a crisp central vertical spine crease at x = 0.5
+ * - Lights up the 3 arrows in series (1 -> 2 -> 3) with a strong animated pulsating effect that runs at a
+ *   progressively faster, more intense pace as the player chains boost pads in series (`uComboPhase` & `uComboLevel`).
+ */
+function createStandardElectricBlueBoostPadMaterial(
+  isNeon: boolean
+): THREE.ShaderMaterial {
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      uTime: { value: 0 },
+      uComboPhase: { value: 0 },
+      uComboLevel: { value: 0 },
+      uCoreColor: { value: new THREE.Color(0x00d8ff) },
+      uRimColor: { value: new THREE.Color(0x0048ff) },
+      uHotColor: { value: new THREE.Color(0xffffff) },
+      uOpacity: { value: isNeon ? 0.99 : 0.95 },
+    },
+    vertexShader: `
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      uniform float uTime;
+      uniform float uComboPhase;
+      uniform float uComboLevel;
+      uniform vec3 uCoreColor;
+      uniform vec3 uRimColor;
+      uniform vec3 uHotColor;
+      uniform float uOpacity;
+      varying vec2 vUv;
+
+      // Exact 2D Signed Distance Field (SDF) for a single closed-loop chevron with vertical wingtips:
+      // Returns signed distance: < 0 inside the chevron, 0 on the outer royal-blue edge, > 0 outside.
+      float chevronClosedLoopSdf(vec2 uv, float apexY, float slope, float vertHeight, float halfSpanX) {
+        float x = abs(uv.x - 0.5);
+        float invLen = inversesqrt(1.0 + slope * slope);
+        float halfH = vertHeight * 0.5;
+
+        // Perpendicular signed distances to upper slanted edge, lower slanted V-edge, and vertical wingtip
+        float dTop = (uv.y - (apexY + halfH - x * slope)) * invLen;
+        float dBot = ((apexY - halfH - x * slope) - uv.y) * invLen;
+        float dSide = x - halfSpanX;
+
+        float dSlant = max(dTop, dBot);
+        float rCorner = 0.011;
+        vec2 q = vec2(dSlant + rCorner, dSide + rCorner);
+        return min(max(q.x, q.y), 0.0) + length(max(q, vec2(0.0))) - rCorner;
+      }
+
+      // Evaluates a single reference-accurate chevron layer (color + alpha) from its SDF
+      vec4 evaluateChevron(
+        vec2 uv,
+        float sdf,
+        float seqLit,
+        float globalPulse
+      ) {
+        // Completely discard/transparent outside the tight neon rim around the chevron (NO rectangular box!)
+        float outerAura = exp(-max(sdf, 0.0) * 145.0) * step(sdf, 0.024);
+        float bodyMask = 1.0 - smoothstep(-0.0025, 0.0025, sdf);
+        float totalAlpha = clamp(bodyMask + outerAura * 0.68, 0.0, 1.0);
+        if (totalAlpha < 0.005) {
+          return vec4(0.0);
+        }
+
+        // 1) Outer Royal-Blue Beveled Frame (-0.019 <= sdf <= 0.0)
+        float outerBevelBand = smoothstep(-0.021, -0.015, sdf) * bodyMask;
+        float outerSpecularCrest = exp(-pow((sdf + 0.007) / 0.0038, 2.0));
+
+        // 2) Continuous Closed-Loop White-Cyan Neon Inner Tube (-0.031 <= sdf <= -0.017)
+        float whiteTubeCore = exp(-pow((sdf + 0.0235) / 0.0046, 2.0));
+        float cyanTubeBloom = exp(-pow((sdf + 0.0235) / 0.0105, 2.0));
+
+        // 3) Inner Electric-Cyan Hexagonal/Diamond Mesh Interior (sdf < -0.027)
+        float innerCoreMask = 1.0 - smoothstep(-0.028, -0.020, sdf);
+
+        // Fine geometric diamond/carbon-hex micro-mesh texture matching gpt-image-2.5-sunburst reference
+        vec2 meshCoord = vec2((uv.x - 0.5) * 210.0, uv.y * 340.0);
+        float dGrid1 = sin(meshCoord.x + meshCoord.y);
+        float dGrid2 = sin(meshCoord.x - meshCoord.y);
+        float hexDots = clamp(dGrid1 * dGrid2, -1.0, 1.0) * 0.5 + 0.5;
+        float meshPattern = mix(0.84, 1.12, smoothstep(0.22, 0.78, hexDots));
+
+        // Central vertical spine ridge & 3D left/right wing facet shading at x = 0.5
+        float centerDist = abs(uv.x - 0.5);
+        float centerSpineLine = exp(-pow(centerDist / 0.0042, 2.0)) * innerCoreMask;
+        float centerSpineGlow = exp(-pow(centerDist / 0.045, 2.0)) * innerCoreMask;
+        float wingFacet = uv.x < 0.5 ? 1.04 : 0.96;
+
+        // Compose colors from outside in:
+        vec3 royalBlueOuter = mix(vec3(0.0, 0.22, 0.92), vec3(0.04, 0.52, 1.0), outerSpecularCrest);
+        vec3 cyanInterior = mix(vec3(0.0, 0.72, 0.98), vec3(0.24, 0.94, 1.0), centerSpineGlow * 0.65 + 0.25)
+                          * meshPattern * wingFacet;
+
+        vec3 col = mix(royalBlueOuter, cyanInterior, innerCoreMask);
+        // Add cyan inner-tube bloom and crisp closed-loop white neon inner tube
+        col = mix(col, vec3(0.35, 0.96, 1.0), cyanTubeBloom * 0.65);
+        col = mix(col, uHotColor, clamp(whiteTubeCore * 0.96 + centerSpineLine * 0.58, 0.0, 1.0));
+
+        // Apply sequential 1 -> 2 -> 3 series ignition & progressive combo pulsation
+        float ignitionFlash = max(0.0, seqLit - 0.85) * 0.65;
+        col = mix(col, uHotColor, clamp(ignitionFlash * (whiteTubeCore + innerCoreMask * 0.45), 0.0, 0.85));
+        col *= (0.72 + 0.42 * seqLit) * globalPulse;
+
+        // Tight neon edge aura outside sdf > 0
+        vec3 auraCol = mix(uRimColor, uCoreColor, 0.5) * (0.85 + 0.35 * seqLit) * globalPulse;
+        vec3 finalRgb = mix(auraCol, col, bodyMask);
+
+        return vec4(finalRgb, totalAlpha);
+      }
+
+      void main() {
+        vec2 uv = vUv;
+
+        // Progressive Series Combo Phase: lights up Chevron 1 -> Chevron 2 -> Chevron 3 in series at a progressively faster pace!
+        float phase = uComboPhase > 0.001 ? uComboPhase : uTime * 2.6;
+        float seqCycle = fract(phase);
+
+        float d1 = abs(fract(seqCycle - 0.16 + 0.5) - 0.5);
+        float d2 = abs(fract(seqCycle - 0.50 + 0.5) - 0.5);
+        float d3 = abs(fract(seqCycle - 0.84 + 0.5) - 0.5);
+
+        float lit1 = 0.46 + 0.94 * exp(-20.0 * d1 * d1);
+        float lit2 = 0.46 + 0.94 * exp(-20.0 * d2 * d2);
+        float lit3 = 0.46 + 0.94 * exp(-20.0 * d3 * d3);
+
+        // Animated pulsating heartbeat that intensifies as combo level (1 -> 2 -> 3+) increases
+        float globalPulse = 0.88 + 0.20 * sin(phase * 6.2831853) + min(0.42, uComboLevel * 0.11);
+
+        // 3 Stacked Closed-Loop Electric-Blue Chevrons (^ ^ ^) matching gpt-image-2.5-sunburst_a_Remove_the_backgroun
+        float sdf1 = chevronClosedLoopSdf(uv, 0.33, 0.52, 0.142, 0.42);
+        float sdf2 = chevronClosedLoopSdf(uv, 0.61, 0.52, 0.142, 0.42);
+        float sdf3 = chevronClosedLoopSdf(uv, 0.89, 0.52, 0.142, 0.42);
+
+        vec4 ch1 = evaluateChevron(uv, sdf1, lit1, globalPulse);
+        vec4 ch2 = evaluateChevron(uv, sdf2, lit2, globalPulse);
+        vec4 ch3 = evaluateChevron(uv, sdf3, lit3, globalPulse);
+
+        // Composite the 3 non-overlapping chevrons with 100% transparent background
+        vec4 combined = ch1;
+        combined.rgb = mix(combined.rgb, ch2.rgb, ch2.a);
+        combined.a = max(combined.a, ch2.a);
+        combined.rgb = mix(combined.rgb, ch3.rgb, ch3.a);
+        combined.a = max(combined.a, ch3.a);
+
+        if (combined.a < 0.015) discard;
+
+        gl_FragColor = vec4(clamp(combined.rgb, vec3(0.0), vec3(1.45)), clamp(combined.a * uOpacity, 0.0, 0.99));
+      }
+    `,
+    transparent: true,
+    blending: THREE.NormalBlending,
+    depthWrite: false,
+    polygonOffset: true,
+    polygonOffsetFactor: -5,
+    polygonOffsetUnits: -5,
+    side: THREE.DoubleSide,
+  });
+}
+
+/**
+ * Custom GLSL Curved-Guardrail Animated Arrow Wall Shader:
+ * Renders the tall curved guardrail arrow modules mounted along parabolic/normal curves (YELLOW)
+ * and difficult curves/hairpins (RED), featuring 3 large bold arrows (>>>) that light up in series!
+ */
+function createCurveGuardrailArrowWallMaterial(
+  isDifficultRed: boolean,
+  isNeon: boolean,
+  neonIntensity: number
+): THREE.ShaderMaterial {
+  const coreHex = isDifficultRed ? 0xff1e1e : 0xffd000;
+  const rimHex = isDifficultRed ? 0xb91c1c : 0xff8800;
+  const hotHex = isDifficultRed ? 0xfecaca : 0xfef9c3;
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      uTime: { value: 0 },
+      uCoreColor: { value: new THREE.Color(coreHex) },
+      uRimColor: { value: new THREE.Color(rimHex) },
+      uHotColor: { value: new THREE.Color(hotHex) },
+      uBrightness: {
+        value: THREE.MathUtils.clamp((isNeon ? 0.96 : 0.72) * neonIntensity, 0.65, 1.38),
+      },
+      uSpeed: { value: isDifficultRed ? 3.4 : 2.6 },
+    },
+    vertexShader: `
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      uniform float uTime;
+      uniform vec3 uCoreColor;
+      uniform vec3 uRimColor;
+      uniform vec3 uHotColor;
+      uniform float uBrightness;
+      uniform float uSpeed;
+      varying vec2 vUv;
+
+      void main() {
+        vec2 uv = vUv;
+        float ySym = abs(uv.y - 0.5) * 2.0;
+
+        // Dark armored guardrail housing
+        vec3 darkHousing = vec3(0.035, 0.048, 0.078);
+
+        // Top & bottom continuous glowing LED trim rails framing the guardrail panel
+        float topBotRail = smoothstep(0.80, 0.90, ySym);
+
+        // 3 Large Bold Forward-Pointing Chevrons (>>>) across the guardrail panel
+        float along = uv.x * 3.0;
+        float cellX = fract(along - ySym * 0.36);
+        float cellId = mod(floor(along - ySym * 0.36), 3.0);
+
+        float chevShape = smoothstep(0.16, 0.28, cellX)
+                        * (1.0 - smoothstep(0.68, 0.80, cellX))
+                        * (1.0 - smoothstep(0.74, 0.84, ySym));
+        float chevRim = (smoothstep(0.16, 0.24, cellX) * (1.0 - smoothstep(0.24, 0.32, cellX))
+                       + smoothstep(0.60, 0.68, cellX) * (1.0 - smoothstep(0.68, 0.78, cellX)))
+                       * (1.0 - smoothstep(0.74, 0.84, ySym));
+
+        // Sequential 1 -> 2 -> 3 series lighting wave + rhythmic pulsation
+        float wave = fract(uTime * uSpeed);
+        float targetPhase = (cellId + 0.5) / 3.0;
+        float dist = abs(fract(wave - targetPhase + 0.5) - 0.5);
+        float seqLit = 0.38 + 1.05 * exp(-18.0 * dist * dist);
+        float pulse = 0.88 + 0.18 * sin(uTime * uSpeed * 6.2831853);
+        float arrowEnergy = clamp(seqLit * pulse, 0.28, 1.48);
+
+        vec3 idleSlot = vec3(0.09, 0.11, 0.16);
+        vec3 activeArrow = mix(uRimColor, uCoreColor, clamp(arrowEnergy * 0.85, 0.0, 1.0));
+        activeArrow = mix(activeArrow, uHotColor, clamp(chevRim * 0.75 + max(0.0, arrowEnergy - 0.88) * 0.85, 0.0, 1.0)) * arrowEnergy;
+
+        vec3 panelCol = mix(darkHousing, mix(idleSlot, activeArrow, clamp(arrowEnergy, 0.0, 1.0)), chevShape);
+        vec3 railCol = mix(uRimColor, uHotColor, 0.45) * (0.85 + 0.20 * sin(uv.x * 12.56 - uTime * 9.0));
+        vec3 finalCol = mix(panelCol, railCol, topBotRail);
+
+        gl_FragColor = vec4(clamp(finalCol * uBrightness, vec3(0.0), vec3(1.42)), 1.0);
+      }
+    `,
+    polygonOffset: true,
+    polygonOffsetFactor: -2,
+    polygonOffsetUnits: -2,
+    side: THREE.DoubleSide,
+  });
+}
+
+/**
+ * Custom GLSL Guardrail Flowing-Arrow & Flowing-Light Channel Shader:
+ * Renders the recessed mid-guardrail light channel along the entire circuit with:
+ * - YELLOW animated flowing arrows (>>>) in Normal & Parabolic Curves (`vCurveType ≈ 1.0`)
+ * - RED animated flowing arrows (>>>) in Difficult Curves & Sharp Hairpins (`vCurveType ≈ 2.0`)
+ * - Sleek glowing cyan/amber guardrail channel on straightaways (`vCurveType ≈ 0.0`)
+ */
+function createFlowingGuardrailChannelMaterial(
+  isCity: boolean,
+  isNeon: boolean,
+  neonIntensity: number
+): THREE.ShaderMaterial {
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      uTime: { value: 0 },
+      uIsCity: { value: isCity ? 1.0 : 0.0 },
+      uBrightness: {
+        value: THREE.MathUtils.clamp((isNeon ? 0.90 : 0.62) * neonIntensity, 0.58, 1.35),
+      },
+    },
+    vertexShader: `
+      attribute float aCurveType;
+      varying vec2 vUv;
+      varying float vCurveType;
+      void main() {
+        vUv = uv;
+        vCurveType = aCurveType;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      uniform float uTime;
+      uniform float uIsCity;
+      uniform float uBrightness;
+      varying vec2 vUv;
+      varying float vCurveType;
+
+      void main() {
+        // Larger, bolder chevron cells (68 cells per tile = ~170 large arrows around the circuit)
+        float along = vUv.x * 68.0;
+        float vy = vUv.y;
+        float ySym = abs(vy - 0.5) * 2.0;
+
+        // Dark recessed metallic channel housing
+        vec3 darkHousing = vec3(0.03, 0.045, 0.08);
+        float topBotRail = smoothstep(0.76, 0.86, ySym);
+
+        // Bold forward-pointing chevron geometry (>) inside each repeating cell along the guardrail
+        float cellX = fract(along - ySym * 0.40);
+        float cellId = floor(along - ySym * 0.40);
+        float chevShape = smoothstep(0.16, 0.28, cellX)
+                        * (1.0 - smoothstep(0.66, 0.78, cellX))
+                        * (1.0 - smoothstep(0.74, 0.84, ySym));
+        float chevRim = (smoothstep(0.16, 0.24, cellX) * (1.0 - smoothstep(0.24, 0.32, cellX))
+                       + smoothstep(0.58, 0.66, cellX) * (1.0 - smoothstep(0.66, 0.76, cellX)))
+                       * (1.0 - smoothstep(0.74, 0.84, ySym));
+
+        // Curve classification weights from vertex attribute:
+        // 0.0 = Straightaway, 1.0 = Normal / Parabolic Curve (YELLOW arrows), 2.0 = Difficult Curve (RED arrows)
+        float inCurve = smoothstep(0.20, 0.75, vCurveType);
+        float isDifficultCurve = smoothstep(1.25, 1.75, vCurveType);
+
+        // High-speed sequential series lighting of 3 consecutive arrows along the guardrail
+        float flowSpeed = mix(2.6, 3.6, isDifficultCurve);
+        float flowWave = fract(cellId * 0.11 - uTime * flowSpeed);
+        float flowingPacket = smoothstep(0.38, 0.86, flowWave) * (1.0 - smoothstep(0.88, 0.98, flowWave));
+        float idleGlow = step(0.68, fract(cellId * 0.3333)) * 0.42;
+        float arrowEnergy = clamp(flowingPacket * (1.25 + 0.30 * inCurve) + idleGlow + 0.16, 0.0, 1.52);
+
+        // Straightaway palette (Electric Blue/Cyan) vs Normal Curve (Vibrant Yellow) vs Difficult Curve (Vibrant Red)
+        vec3 straightCore = vec3(0.0, 0.88, 1.0);
+        vec3 straightHot  = vec3(0.82, 0.97, 1.0);
+
+        vec3 yellowCore   = vec3(1.0, 0.82, 0.0);
+        vec3 yellowHot    = vec3(1.0, 0.98, 0.65);
+
+        vec3 redCore      = vec3(1.0, 0.10, 0.10);
+        vec3 redHot       = vec3(1.0, 0.78, 0.78);
+
+        vec3 curveCore = mix(yellowCore, redCore, isDifficultCurve);
+        vec3 curveHot  = mix(yellowHot, redHot, isDifficultCurve);
+
+        vec3 activeCore = mix(straightCore, curveCore, inCurve);
+        vec3 activeHot  = mix(straightHot, curveHot, inCurve);
+        vec3 railColor  = mix(straightCore, curveCore, inCurve);
+
+        vec3 slotBase = vec3(0.08, 0.11, 0.16);
+        vec3 litChevron = mix(activeCore, activeHot, clamp((arrowEnergy - 0.50) * 0.92 + chevRim * 0.55, 0.0, 1.0)) * arrowEnergy;
+        vec3 channelCol = mix(darkHousing, mix(slotBase, litChevron, clamp(arrowEnergy, 0.0, 1.0)), chevShape);
+
+        float railPulse = 0.80 + 0.20 * sin(along * 0.35 - uTime * 9.0);
+        vec3 finalCol = mix(channelCol, mix(railColor, activeHot, 0.35) * railPulse, topBotRail);
+
+        gl_FragColor = vec4(clamp(finalCol * uBrightness, vec3(0.0), vec3(1.42)), 1.0);
+      }
+    `,
+    polygonOffset: true,
+    polygonOffsetFactor: -2,
+    polygonOffsetUnits: -2,
+    side: THREE.DoubleSide,
+  });
+}
+
+/**
+ * Custom GLSL Flowing Top Plasma Rail Shader (`Screenshot_from_2026-10-29_22-07-54_7c765c69.png`):
+ * Renders the continuous blazing orange-red / solar-gold / electric-cyan upper plasma guardrail tube
+ * with a high-velocity traveling energy current along the track perimeter!
+ */
+function createFlowingTopRailMaterial(
+  isCity: boolean,
+  isNeon: boolean,
+  neonIntensity: number
+): THREE.ShaderMaterial {
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      uTime: { value: 0 },
+      uIsCity: { value: isCity ? 1.0 : 0.0 },
+      uBrightness: {
+        value: THREE.MathUtils.clamp((isNeon ? 0.92 : 0.62) * neonIntensity, 0.58, 1.32),
+      },
+    },
+    vertexShader: `
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      uniform float uTime;
+      uniform float uIsCity;
+      uniform float uBrightness;
+      varying vec2 vUv;
+
+      void main() {
+        float along = vUv.x * 110.0;
+        float coreProfile = 1.0 - abs(vUv.y - 0.5) * 1.75;
+        float surge1 = 0.78 + 0.28 * sin(along - uTime * 14.0);
+        float surge2 = smoothstep(0.65, 0.98, sin(along * 0.45 - uTime * 9.5)) * 0.38;
+
+        // Warm blazing orange-red / solar-gold plasma tube (matching the In-Game Examples in good_game_assets_aacb9e02.png)
+        vec3 basePlasma = uIsCity > 0.5 ? vec3(1.0, 0.62, 0.06) : vec3(1.0, 0.36, 0.04);
+        vec3 hotCore = vec3(1.0, 0.95, 0.68);
+        vec3 col = mix(basePlasma, hotCore, clamp(coreProfile * 0.65 + surge2, 0.0, 1.0)) * surge1;
+
+        gl_FragColor = vec4(clamp(col * uBrightness, vec3(0.0), vec3(1.38)), 1.0);
+      }
+    `,
+    side: THREE.DoubleSide,
+  });
+}
+
+/**
+ * Custom GLSL Beveled Lower Curb Light Strip Shader (`Screenshot_from_2026-10-29_22-07-54_7c765c69.png`):
+ * Renders the 3D beveled metallic curb along the base of the guardrails with alternating
+ * glowing Electric-Cyan (#00e5ff) and Amber-Orange (#ff8800) rectangular light modules!
+ */
+function createFlowingCurbLightStripMaterial(
+  isNeon: boolean,
+  neonIntensity: number
+): THREE.ShaderMaterial {
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      uTime: { value: 0 },
+      uBrightness: {
+        value: THREE.MathUtils.clamp((isNeon ? 0.88 : 0.58) * neonIntensity, 0.52, 1.25),
+      },
+    },
+    vertexShader: `
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      uniform float uTime;
+      uniform float uBrightness;
+      varying vec2 vUv;
+
+      void main() {
+        float cellCoord = vUv.x * 140.0;
+        float cellFract = fract(cellCoord);
+        float cellIdx = floor(cellCoord);
+        float ySym = abs(vUv.y - 0.5) * 2.0;
+
+        // Dark beveled metallic curb housing
+        vec3 curbMetal = vec3(0.07, 0.10, 0.16);
+        float moduleMask = smoothstep(0.14, 0.20, cellFract) * (1.0 - smoothstep(0.80, 0.86, cellFract))
+                         * (1.0 - smoothstep(0.62, 0.78, ySym));
+        float innerCoreMask = smoothstep(0.24, 0.32, cellFract) * (1.0 - smoothstep(0.68, 0.76, cellFract))
+                            * (1.0 - smoothstep(0.32, 0.52, ySym));
+
+        // Alternating Electric Cyan (even) and Molten Amber-Orange (odd) curb light modules
+        float isOrange = mod(cellIdx, 2.0);
+        vec3 modCol = mix(vec3(0.0, 0.88, 1.0), vec3(1.0, 0.52, 0.04), isOrange);
+        vec3 hotCol = mix(vec3(0.85, 0.98, 1.0), vec3(1.0, 0.94, 0.55), isOrange);
+
+        // Sequential flowing wave pulse along the curb modules
+        float flowPulse = 0.76 + 0.34 * sin(cellIdx * 0.45 - uTime * 8.5);
+        vec3 litCol = mix(modCol, hotCol, innerCoreMask) * flowPulse * uBrightness;
+
+        vec3 finalCol = mix(curbMetal, litCol, moduleMask);
+        gl_FragColor = vec4(clamp(finalCol, vec3(0.0), vec3(1.35)), 1.0);
+      }
+    `,
+    polygonOffset: true,
+    polygonOffsetFactor: -1,
+    polygonOffsetUnits: -1,
     side: THREE.DoubleSide,
   });
 }
@@ -1525,6 +2002,7 @@ export function buildTrackAndWorld(
 
   const leftMidCyanStripPositions = new Float32Array((segments + 1) * 2 * 3);
   const rightMidCyanStripPositions = new Float32Array((segments + 1) * 2 * 3);
+  const railCurveTypeAttr = new Float32Array((segments + 1) * 2);
 
   const leftNeonStripPositions = new Float32Array((segments + 1) * 2 * 3);
   const rightNeonStripPositions = new Float32Array((segments + 1) * 2 * 3);
@@ -1620,78 +2098,98 @@ export function buildTrackAndWorld(
     deckApronUvs[uvIdx + 2] = isUpgradedTrack ? 0.5 : 0.25;
     deckApronUvs[uvIdx + 3] = vTile;
 
-    // Segmented Armored Guardrail Base (1.20m high)
-    const railH = 1.20;
-    leftRailPositions[vIdx] = lx;
-    leftRailPositions[vIdx + 1] = ly;
-    leftRailPositions[vIdx + 2] = lz;
-    leftRailPositions[vIdx + 3] = lx + up.x * railH;
-    leftRailPositions[vIdx + 4] = ly + up.y * railH;
-    leftRailPositions[vIdx + 5] = lz + up.z * railH;
+    // Smoothed local curvature magnitude to classify Straightaways (0.0), Normal/Parabolic Curves (1.0 -> Yellow Arrows),
+    // and Difficult Curves/Hairpins (2.0 -> Red Arrows), while dynamically increasing guardrail height in curves!
+    const k0 = Math.abs(estimateTrackCurvature(trackId, t));
+    const kPrev = Math.abs(estimateTrackCurvature(trackId, (t - 0.010 + 1) % 1));
+    const kNext = Math.abs(estimateTrackCurvature(trackId, (t + 0.010) % 1));
+    const maxCurveK = Math.max(k0, (kPrev + k0 + kNext) / 3);
+    const curveTypeVal = maxCurveK >= 0.30 ? 2.0 : maxCurveK >= 0.055 ? 1.0 : 0.0;
+    railCurveTypeAttr[i * 2] = curveTypeVal;
+    railCurveTypeAttr[i * 2 + 1] = curveTypeVal;
 
-    rightRailPositions[vIdx] = rx;
-    rightRailPositions[vIdx + 1] = ry;
-    rightRailPositions[vIdx + 2] = rz;
-    rightRailPositions[vIdx + 3] = rx + up.x * railH;
-    rightRailPositions[vIdx + 4] = ry + up.y * railH;
-    rightRailPositions[vIdx + 5] = rz + up.z * railH;
+    // Larger, taller Segmented Armored Guardrail Base positioned at railW = halfW + 1.25 (14.75m)
+    // so when a craft reaches its physical boundary limit (±12.13m), its outer wingtip (±2.54m -> 14.67m)
+    // contacts the inner guardrail face cleanly without ever clipping through the wall or curve arrows!
+    const railOutset = 1.25;
+    const gLx = lx - right.x * railOutset;
+    const gLy = ly - right.y * railOutset;
+    const gLz = lz - right.z * railOutset;
+    const gRx = rx + right.x * railOutset;
+    const gRy = ry + right.y * railOutset;
+    const gRz = rz + right.z * railOutset;
+
+    const railH = curveTypeVal >= 1.5 ? 2.55 : curveTypeVal >= 0.5 ? 2.25 : 1.72;
+    leftRailPositions[vIdx] = gLx;
+    leftRailPositions[vIdx + 1] = gLy;
+    leftRailPositions[vIdx + 2] = gLz;
+    leftRailPositions[vIdx + 3] = gLx + up.x * railH;
+    leftRailPositions[vIdx + 4] = gLy + up.y * railH;
+    leftRailPositions[vIdx + 5] = gLz + up.z * railH;
+
+    rightRailPositions[vIdx] = gRx;
+    rightRailPositions[vIdx + 1] = gRy;
+    rightRailPositions[vIdx + 2] = gRz;
+    rightRailPositions[vIdx + 3] = gRx + up.x * railH;
+    rightRailPositions[vIdx + 4] = gRy + up.y * railH;
+    rightRailPositions[vIdx + 5] = gRz + up.z * railH;
 
     railUvs[uvIdx] = vTile;
     railUvs[uvIdx + 1] = 0;
     railUvs[uvIdx + 2] = vTile;
     railUvs[uvIdx + 3] = 1;
 
-    // 3D Beveled Upper Barrier Coping Flange at 1.24m (cleanly above 1.20m rail wall)
-    const capH = 1.24;
-    const capW = 0.55;
-    leftCapPositions[vIdx] = lx - right.x * capW + up.x * capH;
-    leftCapPositions[vIdx + 1] = ly - right.y * capW + up.y * capH;
-    leftCapPositions[vIdx + 2] = lz - right.z * capW + up.z * capH;
-    leftCapPositions[vIdx + 3] = lx + right.x * 0.08 + up.x * capH;
-    leftCapPositions[vIdx + 4] = ly + right.y * 0.08 + up.y * capH;
-    leftCapPositions[vIdx + 5] = lz + right.z * 0.08 + up.z * capH;
+    // 3D Beveled Upper Barrier Coping Flange cleanly above the taller guardrail wall
+    const capH = railH + 0.04;
+    const capW = 0.62;
+    leftCapPositions[vIdx] = gLx - right.x * capW + up.x * capH;
+    leftCapPositions[vIdx + 1] = gLy - right.y * capW + up.y * capH;
+    leftCapPositions[vIdx + 2] = gLz - right.z * capW + up.z * capH;
+    leftCapPositions[vIdx + 3] = gLx + right.x * 0.08 + up.x * capH;
+    leftCapPositions[vIdx + 4] = gLy + right.y * 0.08 + up.y * capH;
+    leftCapPositions[vIdx + 5] = gLz + right.z * 0.08 + up.z * capH;
 
-    rightCapPositions[vIdx] = rx - right.x * 0.08 + up.x * capH;
-    rightCapPositions[vIdx + 1] = ry - right.y * 0.08 + up.y * capH;
-    rightCapPositions[vIdx + 2] = rz - right.z * 0.08 + up.z * capH;
-    rightCapPositions[vIdx + 3] = rx + right.x * capW + up.x * capH;
-    rightCapPositions[vIdx + 4] = ry + right.y * capW + up.y * capH;
-    rightCapPositions[vIdx + 5] = rz + right.z * capW + up.z * capH;
+    rightCapPositions[vIdx] = gRx - right.x * 0.08 + up.x * capH;
+    rightCapPositions[vIdx + 1] = gRy - right.y * 0.08 + up.y * capH;
+    rightCapPositions[vIdx + 2] = gRz - right.z * 0.08 + up.z * capH;
+    rightCapPositions[vIdx + 3] = gRx + right.x * capW + up.x * capH;
+    rightCapPositions[vIdx + 4] = gRy + right.y * capW + up.y * capH;
+    rightCapPositions[vIdx + 5] = gRz + right.z * capW + up.z * capH;
 
-    // Separate 3D Geometric Emissive Cyan Light Strip inside the Recessed Mid-Barrier Channel
-    const midH1 = 0.62;
-    const midH2 = 0.75;
-    const inwardOffset = 0.06;
-    leftMidCyanStripPositions[vIdx] = lx + right.x * inwardOffset + up.x * midH1;
-    leftMidCyanStripPositions[vIdx + 1] = ly + right.y * inwardOffset + up.y * midH1;
-    leftMidCyanStripPositions[vIdx + 2] = lz + right.z * inwardOffset + up.z * midH1;
-    leftMidCyanStripPositions[vIdx + 3] = lx + right.x * inwardOffset + up.x * midH2;
-    leftMidCyanStripPositions[vIdx + 4] = ly + right.y * inwardOffset + up.y * midH2;
-    leftMidCyanStripPositions[vIdx + 5] = lz + right.z * inwardOffset + up.z * midH2;
+    // Large, High-Visibility 3D Animated Arrow Channel inside the Recessed Guardrail (0.36m to railH - 0.24m)
+    const midH1 = 0.36;
+    const midH2 = railH - 0.24;
+    const inwardOffset = 0.075;
+    leftMidCyanStripPositions[vIdx] = gLx + right.x * inwardOffset + up.x * midH1;
+    leftMidCyanStripPositions[vIdx + 1] = gLy + right.y * inwardOffset + up.y * midH1;
+    leftMidCyanStripPositions[vIdx + 2] = gLz + right.z * inwardOffset + up.z * midH1;
+    leftMidCyanStripPositions[vIdx + 3] = gLx + right.x * inwardOffset + up.x * midH2;
+    leftMidCyanStripPositions[vIdx + 4] = gLy + right.y * inwardOffset + up.y * midH2;
+    leftMidCyanStripPositions[vIdx + 5] = gLz + right.z * inwardOffset + up.z * midH2;
 
-    rightMidCyanStripPositions[vIdx] = rx - right.x * inwardOffset + up.x * midH1;
-    rightMidCyanStripPositions[vIdx + 1] = ry - right.y * inwardOffset + up.y * midH1;
-    rightMidCyanStripPositions[vIdx + 2] = rz - right.z * inwardOffset + up.z * midH1;
-    rightMidCyanStripPositions[vIdx + 3] = rx - right.x * inwardOffset + up.x * midH2;
-    rightMidCyanStripPositions[vIdx + 4] = ry - right.y * inwardOffset + up.y * midH2;
-    rightMidCyanStripPositions[vIdx + 5] = rz - right.z * inwardOffset + up.z * midH2;
+    rightMidCyanStripPositions[vIdx] = gRx - right.x * inwardOffset + up.x * midH1;
+    rightMidCyanStripPositions[vIdx + 1] = gRy - right.y * inwardOffset + up.y * midH1;
+    rightMidCyanStripPositions[vIdx + 2] = gRz - right.z * inwardOffset + up.z * midH1;
+    rightMidCyanStripPositions[vIdx + 3] = gRx - right.x * inwardOffset + up.x * midH2;
+    rightMidCyanStripPositions[vIdx + 4] = gRy - right.y * inwardOffset + up.y * midH2;
+    rightMidCyanStripPositions[vIdx + 5] = gRz - right.z * inwardOffset + up.z * midH2;
 
-    // Glowing Laser Rim Strip cleanly above the Coping Cap (1.26m to 1.44m)
-    const stripH1 = 1.26;
-    const stripH2 = 1.44;
-    leftNeonStripPositions[vIdx] = lx + up.x * stripH1;
-    leftNeonStripPositions[vIdx + 1] = ly + up.y * stripH1;
-    leftNeonStripPositions[vIdx + 2] = lz + up.z * stripH1;
-    leftNeonStripPositions[vIdx + 3] = lx + up.x * stripH2;
-    leftNeonStripPositions[vIdx + 4] = ly + up.y * stripH2;
-    leftNeonStripPositions[vIdx + 5] = lz + up.z * stripH2;
+    // Flowing Plasma Top Rail Strip cleanly above the Coping Cap
+    const stripH1 = railH + 0.06;
+    const stripH2 = railH + 0.28;
+    leftNeonStripPositions[vIdx] = gLx + up.x * stripH1;
+    leftNeonStripPositions[vIdx + 1] = gLy + up.y * stripH1;
+    leftNeonStripPositions[vIdx + 2] = gLz + up.z * stripH1;
+    leftNeonStripPositions[vIdx + 3] = gLx + up.x * stripH2;
+    leftNeonStripPositions[vIdx + 4] = gLy + up.y * stripH2;
+    leftNeonStripPositions[vIdx + 5] = gLz + up.z * stripH2;
 
-    rightNeonStripPositions[vIdx] = rx + up.x * stripH1;
-    rightNeonStripPositions[vIdx + 1] = ry + up.y * stripH1;
-    rightNeonStripPositions[vIdx + 2] = rz + up.z * stripH1;
-    rightNeonStripPositions[vIdx + 3] = rx + up.x * stripH2;
-    rightNeonStripPositions[vIdx + 4] = ry + up.y * stripH2;
-    rightNeonStripPositions[vIdx + 5] = rz + up.z * stripH2;
+    rightNeonStripPositions[vIdx] = gRx + up.x * stripH1;
+    rightNeonStripPositions[vIdx + 1] = gRy + up.y * stripH1;
+    rightNeonStripPositions[vIdx + 2] = gRz + up.z * stripH1;
+    rightNeonStripPositions[vIdx + 3] = gRx + up.x * stripH2;
+    rightNeonStripPositions[vIdx + 4] = gRy + up.y * stripH2;
+    rightNeonStripPositions[vIdx + 5] = gRz + up.z * stripH2;
 
     if (i < segments) {
       const a = i * 2;
@@ -1840,15 +2338,17 @@ export function buildTrackAndWorld(
   worldGroup.add(new THREE.Mesh(leftCapGeo, graphiteStructureMat));
   worldGroup.add(new THREE.Mesh(rightCapGeo, graphiteStructureMat));
 
-  // Separate 3D Geometric Emissive Light Strip inside the Recessed Guardrail Channel:
-  // - City Track: Crisp Ice-White / Solar-Gold (#fef08a) so it stands out sharply from cool blue/violet buildings
-  // - Lava Track: Cool Electric Cyan (#00f2fe) so it stands out sharply from warm magma mountains
+  // Separate 3D Geometric Flowing-Arrow & Flowing-Light Channel inside the Recessed Guardrail
   const leftMidCyanGeo = new THREE.BufferGeometry();
   leftMidCyanGeo.setAttribute('position', new THREE.BufferAttribute(leftMidCyanStripPositions, 3));
+  leftMidCyanGeo.setAttribute('uv', new THREE.BufferAttribute(railUvs, 2));
+  leftMidCyanGeo.setAttribute('aCurveType', new THREE.BufferAttribute(railCurveTypeAttr, 1));
   leftMidCyanGeo.setIndex(railIndices);
 
   const rightMidCyanGeo = new THREE.BufferGeometry();
   rightMidCyanGeo.setAttribute('position', new THREE.BufferAttribute(rightMidCyanStripPositions, 3));
+  rightMidCyanGeo.setAttribute('uv', new THREE.BufferAttribute(railUvs, 2));
+  rightMidCyanGeo.setAttribute('aCurveType', new THREE.BufferAttribute(railCurveTypeAttr, 1));
   rightMidCyanGeo.setIndex(railIndices);
 
   const stripBrightness = THREE.MathUtils.clamp(0.45 + 0.38 * neonIntensity, 0.48, 0.96);
@@ -1860,10 +2360,12 @@ export function buildTrackAndWorld(
     polygonOffsetUnits: -1,
     side: THREE.DoubleSide,
   });
-  worldGroup.add(new THREE.Mesh(leftMidCyanGeo, midCyanLightMat));
-  worldGroup.add(new THREE.Mesh(rightMidCyanGeo, midCyanLightMat));
+  const flowingGuardrailChannelMat = createFlowingGuardrailChannelMaterial(isCity, isNeon, neonIntensity);
+  animatedShaders.push(flowingGuardrailChannelMat);
+  worldGroup.add(new THREE.Mesh(leftMidCyanGeo, flowingGuardrailChannelMat));
+  worldGroup.add(new THREE.Mesh(rightMidCyanGeo, flowingGuardrailChannelMat));
 
-  // Glowing Neon Top Rail Strips (Warm Solar-Gold #fbbf24 on City; Cool Electric Cyan #38bdf8 on Lava)
+  // Flowing Top Plasma Rail Strips (`Screenshot_from_2026-10-29_22-07-54_7c765c69.png`)
   const leftStripGeo = new THREE.BufferGeometry();
   leftStripGeo.setAttribute('position', new THREE.BufferAttribute(leftNeonStripPositions, 3));
   leftStripGeo.setAttribute('uv', new THREE.BufferAttribute(railUvs, 2));
@@ -1874,15 +2376,59 @@ export function buildTrackAndWorld(
   rightStripGeo.setAttribute('uv', new THREE.BufferAttribute(railUvs, 2));
   rightStripGeo.setIndex(railIndices);
 
-  const topStripColor = new THREE.Color(
-    isNeon ? (isCity ? 0xfbbf24 : 0x38bdf8) : 0x38bdf8
-  ).multiplyScalar(stripBrightness);
-  const neonStripMat = new THREE.MeshBasicMaterial({
-    color: topStripColor,
-    side: THREE.DoubleSide,
-  });
-  worldGroup.add(new THREE.Mesh(leftStripGeo, neonStripMat));
-  worldGroup.add(new THREE.Mesh(rightStripGeo, neonStripMat));
+  const flowingTopRailMat = createFlowingTopRailMaterial(isCity, isNeon, neonIntensity);
+  animatedShaders.push(flowingTopRailMat);
+  worldGroup.add(new THREE.Mesh(leftStripGeo, flowingTopRailMat));
+  worldGroup.add(new THREE.Mesh(rightStripGeo, flowingTopRailMat));
+
+  // 3D Beveled Lower Curb Light Strip with Alternating Electric-Cyan & Amber-Orange Modules along both guardrails
+  const leftCurbStripPositions = new Float32Array((segments + 1) * 2 * 3);
+  const rightCurbStripPositions = new Float32Array((segments + 1) * 2 * 3);
+  for (let i = 0; i <= segments; i++) {
+    const vIdx = i * 2 * 3;
+    const lx = leftRailPositions[vIdx];
+    const ly = leftRailPositions[vIdx + 1];
+    const lz = leftRailPositions[vIdx + 2];
+    const rx = rightRailPositions[vIdx];
+    const ry = rightRailPositions[vIdx + 1];
+    const rz = rightRailPositions[vIdx + 2];
+    const ux = roadNormals[vIdx];
+    const uy = roadNormals[vIdx + 1];
+    const uz = roadNormals[vIdx + 2];
+    const spanW = (halfW + 1.25) * 2;
+    const rVecX = (rx - lx) / spanW;
+    const rVecY = (ry - ly) / spanW;
+    const rVecZ = (rz - lz) / spanW;
+
+    // Slanted 3D curb face bridging the road edge (inward 1.25m, height 0.03m) to the guardrail base (inward 0.08m, height 0.30m)
+    leftCurbStripPositions[vIdx] = lx + rVecX * 1.25 + ux * 0.03;
+    leftCurbStripPositions[vIdx + 1] = ly + rVecY * 1.25 + uy * 0.03;
+    leftCurbStripPositions[vIdx + 2] = lz + rVecZ * 1.25 + uz * 0.03;
+    leftCurbStripPositions[vIdx + 3] = lx + rVecX * 0.08 + ux * 0.30;
+    leftCurbStripPositions[vIdx + 4] = ly + rVecY * 0.08 + uy * 0.30;
+    leftCurbStripPositions[vIdx + 5] = lz + rVecZ * 0.08 + uz * 0.30;
+
+    rightCurbStripPositions[vIdx] = rx - rVecX * 1.25 + ux * 0.03;
+    rightCurbStripPositions[vIdx + 1] = ry - rVecY * 1.25 + uy * 0.03;
+    rightCurbStripPositions[vIdx + 2] = rz - rVecZ * 1.25 + uz * 0.03;
+    rightCurbStripPositions[vIdx + 3] = rx - rVecX * 0.08 + ux * 0.30;
+    rightCurbStripPositions[vIdx + 4] = ry - rVecY * 0.08 + uy * 0.30;
+    rightCurbStripPositions[vIdx + 5] = rz - rVecZ * 0.08 + uz * 0.30;
+  }
+  const leftCurbStripGeo = new THREE.BufferGeometry();
+  leftCurbStripGeo.setAttribute('position', new THREE.BufferAttribute(leftCurbStripPositions, 3));
+  leftCurbStripGeo.setAttribute('uv', new THREE.BufferAttribute(railUvs, 2));
+  leftCurbStripGeo.setIndex(railIndices);
+
+  const rightCurbStripGeo = new THREE.BufferGeometry();
+  rightCurbStripGeo.setAttribute('position', new THREE.BufferAttribute(rightCurbStripPositions, 3));
+  rightCurbStripGeo.setAttribute('uv', new THREE.BufferAttribute(railUvs, 2));
+  rightCurbStripGeo.setIndex(railIndices);
+
+  const curbLightStripMat = createFlowingCurbLightStripMaterial(isNeon, neonIntensity);
+  animatedShaders.push(curbLightStripMat);
+  worldGroup.add(new THREE.Mesh(leftCurbStripGeo, curbLightStripMat));
+  worldGroup.add(new THREE.Mesh(rightCurbStripGeo, curbLightStripMat));
 
   // Guardrail Rib Stanchions & Support Brackets (scaled to 260 on Extended City Circuit)
   const stanchionCount = isCity ? 260 : 120;
@@ -1912,7 +2458,7 @@ export function buildTrackAndWorld(
 
     dummy.position
       .copy(pos)
-      .addScaledVector(right, -(halfW + 0.34))
+      .addScaledVector(right, -(halfW + 1.58))
       .addScaledVector(up, 0.72);
     dummy.quaternion.setFromRotationMatrix(rotMat);
     dummy.scale.set(1, 1, 1);
@@ -1921,7 +2467,7 @@ export function buildTrackAndWorld(
 
     dummy.position
       .copy(pos)
-      .addScaledVector(right, halfW + 0.34)
+      .addScaledVector(right, halfW + 1.58)
       .addScaledVector(up, 0.72);
     dummy.updateMatrix();
     rightStanchions.setMatrixAt(i, dummy.matrix);
@@ -1949,7 +2495,7 @@ export function buildTrackAndWorld(
   const pylonInstanced = new THREE.InstancedMesh(pylonGeo, pylonMat, pylonCount);
   const beamInstanced = new THREE.InstancedMesh(crossBeamGeo, pylonMat, pylonCount);
   const pylonCheckSamples = buildTrackSamplesXZ(spline, 720);
-  const minPylonHorizClearanceSq = (halfW + 15.0) * (halfW + 15.0);
+  const minPylonHorizClearanceSq = (halfW + 24.0) * (halfW + 24.0);
 
   for (let i = 0; i < pylonCount; i++) {
     const t = i / pylonCount;
@@ -1958,13 +2504,13 @@ export function buildTrackAndWorld(
     rotMat.lookAt(pos, lookTarget, up);
 
     let collidesWithOtherSegment = isCity
-      ? (t >= 0.695 && t <= 0.755) || (t >= 0.778 && t <= 0.825)
+      ? (t >= 0.145 && t <= 0.225) || (t >= 0.695 && t <= 0.835)
       : (t >= 0.132 && t <= 0.184) || (t >= 0.742 && t <= 0.858);
     if (!collidesWithOtherSegment) {
       for (let sIdx = 0; sIdx < pylonCheckSamples.length; sIdx++) {
         const sT = sIdx / pylonCheckSamples.length;
         const dT = Math.abs(t - sT);
-        if (dT > 0.024 && dT < 0.976) {
+        if (dT > 0.018 && dT < 0.982) {
           const dx = pos.x - pylonCheckSamples[sIdx].x;
           const dz = pos.z - pylonCheckSamples[sIdx].z;
           if (dx * dx + dz * dz < minPylonHorizClearanceSq) {
@@ -2109,9 +2655,9 @@ export function buildTrackAndWorld(
   }
 
   // ============================================================================
-  // ON-TRACK 3D POWER-UP / BONUS SYSTEM WITH IN-GAME HOLOGRAPHIC BOXES
+  // ON-TRACK 3D POWER-UP / BONUS SYSTEM WITH FLOATING 3D SPINNING HOLOGRAPHIC BOXES
   // Strictly modeled after the 6 reference items for both City and Lava circuits:
-  // 1. BOOST          — Circular cyan energy ring with segmented dark-metal casing
+  // 1. BOOST          — Flat on-track yellow triple-arrow velocity boost pad
   // 2. NITRO POWER-UP — Tilted compact canister filled with glowing blue fuel
   // 3. CRYSTAL BONUS  — Sharp faceted magenta crystal floating above the track
   // 4. SHIELD POWER-UP— Blue-violet orb protected by a glowing hexagonal energy grid & clamps
@@ -2120,12 +2666,17 @@ export function buildTrackAndWorld(
   // ============================================================================
   const powerUpBoxes: PowerUpPickupInstance[] = [];
 
-  const boostPadGeo = new THREE.PlaneGeometry(3.8, 5.2);
+  // Unified Standard Lane-Wide Electric-Blue 3-Arrow Velocity-Boost Pad (9.2m wide x 18.6m long):
+  // Modeled strictly after `Screenshot_from_2026-10-29_22-37-54_b7ecbeab.png`:
+  // - One single standard boost pad across all tracks (same size, same Electric Blue color).
+  // - Wide enough to cover a full lane of the track (9.2m) and long in proportion (18.6m).
+  // - 3 Electric Blue arrows (>>>) that light up in series with a progressive combo pulsation!
+  const boostPadGeo = new THREE.PlaneGeometry(9.2, 18.6);
   boostPadGeo.rotateX(-Math.PI / 2);
 
-  const boostPadMat = createPadShaderMaterial(0x00d8ff, 0x38bdf8, isNeon);
+  const standardBoostPadMat = createStandardElectricBlueBoostPadMaterial(isNeon);
   const rechargePadMat = createPadShaderMaterial(0x10b981, 0x22d3ee, isNeon);
-  animatedShaders.push(boostPadMat, rechargePadMat);
+  animatedShaders.push(standardBoostPadMat, rechargePadMat);
 
   // Shared materials for the 6 Power-Up 3D models & In-Game Pickup Box frames
   const darkCasingMat = new THREE.MeshStandardMaterial({
@@ -2212,12 +2763,19 @@ export function buildTrackAndWorld(
     color: 0xfef08a,
   });
 
-  // Shared geometries for the In-Game Holographic Pickup Box Frame
-  const basePlateGeo = new THREE.CylinderGeometry(1.45, 1.65, 0.12, 8);
-  const baseGlowRingGeo = new THREE.RingGeometry(1.12, 1.38, 32);
+  // Shared geometries for High-Visibility 3D Spinning Power-Up, Bonus & Weapon Boxes Floating Above the Track
+  const baseGlowRingGeo = new THREE.RingGeometry(1.15, 1.68, 32);
   baseGlowRingGeo.rotateX(-Math.PI / 2);
-  const holoCrateEdgeGeo = new THREE.BoxGeometry(1.62, 1.62, 1.62);
-  const cornerBracketGeo = new THREE.BoxGeometry(0.26, 0.26, 0.26);
+  const baseInnerDiscGeo = new THREE.CircleGeometry(1.15, 32);
+  baseInnerDiscGeo.rotateX(-Math.PI / 2);
+  const holoCrateSize = 2.56;
+  const holoCrateHalf = holoCrateSize * 0.5;
+  const holoCrateGlassGeo = new THREE.BoxGeometry(2.44, 2.44, 2.44);
+  const holoStrutBarXGeo = new THREE.BoxGeometry(holoCrateSize, 0.16, 0.16);
+  const holoStrutBarYGeo = new THREE.BoxGeometry(0.16, holoCrateSize, 0.16);
+  const holoStrutBarZGeo = new THREE.BoxGeometry(0.16, 0.16, holoCrateSize);
+  const holoInnerOctaGeo = new THREE.OctahedronGeometry(1.48, 0);
+  const cornerBracketGeo = new THREE.BoxGeometry(0.42, 0.42, 0.42);
 
   const create3DPowerUpModel = (pType: PowerUpItemType): THREE.Group => {
     const itemGroup = new THREE.Group();
@@ -2365,6 +2923,7 @@ export function buildTrackAndWorld(
         for (const sy of [-1, 1]) {
           for (const sz of [-1, 1]) {
             const corner = new THREE.Mesh(cornerBracketGeo, gunmetalTrimMat);
+            corner.scale.setScalar(0.75);
             corner.position.set(sx * 0.36, sy * 0.36, sz * 0.36);
             itemGroup.add(corner);
           }
@@ -2605,99 +3164,116 @@ export function buildTrackAndWorld(
     rotMat.lookAt(padHolder.position, lookTarget, up);
     padHolder.quaternion.setFromRotationMatrix(rotMat);
 
-    // Fixed On-Track Speed Boost Pads:
-    // Rendered directly on the track surface with chevron shader strip + low-profile cyan energy ring arch,
-    // and never despawn when driven over!
+    // Unified Standard On-Track Velocity Boost Pad (9.2m wide x 18.6m long, Electric Blue 3-Arrows in Series):
+    // Identical size and Electric Blue color across all tracks (`Screenshot_from_2026-10-29_22-37-54_b7ecbeab.png`)
     if (isFixedBoostPad) {
-      padHolder.add(new THREE.Mesh(boostPadGeo, boostPadMat));
-      const baseRingMat = new THREE.MeshBasicMaterial({
-        color: accentHex,
-        transparent: true,
-        opacity: 0.92,
-        side: THREE.DoubleSide,
-      });
-      const baseRingMesh = new THREE.Mesh(baseGlowRingGeo, baseRingMat);
-      baseRingMesh.position.y = 0.08;
-      padHolder.add(baseRingMesh);
+      // Frameless 3-Arrow Electric-Blue Decal Surface directly on the track (NO blue rectangle skirt or ghosted mesh)
+      const padSurface = new THREE.Mesh(boostPadGeo, standardBoostPadMat);
+      padSurface.position.y = -0.02;
+      padHolder.add(padSurface);
 
-      const boostArchItem = create3DPowerUpModel('boost');
-      boostArchItem.position.y = 0.78;
-      boostArchItem.scale.setScalar(1.08);
-      padHolder.add(boostArchItem);
       worldGroup.add(padHolder);
       continue;
     }
 
-    // Respawning Bonus & Weapon Squares (disappear when taken by any racer and respawn after 10.0s):
-    if (!isWeaponPad && pType === 'repair') {
-      padHolder.add(new THREE.Mesh(boostPadGeo, rechargePadMat));
-    }
-
-    const basePlate = new THREE.Mesh(basePlateGeo, darkCasingMat);
-    basePlate.position.y = 0.04;
-    padHolder.add(basePlate);
-
+    // Respawning 3D Spinning Power-Up, Bonus & Weapon Boxes Floating Above the Track:
+    // Projected holographic ground ring directly under the floating 3D box
     const baseRingMat = new THREE.MeshBasicMaterial({
-      color: accentHex,
-      transparent: true,
-      opacity: 0.88,
-      side: THREE.DoubleSide,
-    });
-    const baseRingMesh = new THREE.Mesh(baseGlowRingGeo, baseRingMat);
-    baseRingMesh.position.y = 0.12;
-    padHolder.add(baseRingMesh);
-
-    // Floating In-Game Holographic Item/Weapon Box Frame
-    const holoBoxGroup = new THREE.Group();
-    holoBoxGroup.position.y = 1.28;
-    const holoWireMat = new THREE.MeshBasicMaterial({
-      color: accentHex,
-      wireframe: true,
-      transparent: true,
-      opacity: isWeaponPad ? 0.42 : 0.28,
-    });
-    const holoCrateWire = new THREE.Mesh(holoCrateEdgeGeo, holoWireMat);
-    holoBoxGroup.add(holoCrateWire);
-
-    // Tactical Hazard Frame Bars for Army / Weapon Boxes so players spot weapon crates immediately
-    if (isWeaponPad) {
-      const tacticalBandGeo = new THREE.TorusGeometry(0.95, 0.04, 8, 4);
-      tacticalBandGeo.rotateX(Math.PI / 2);
-      tacticalBandGeo.rotateY(Math.PI / 4);
-      const tacticalBandMat = new THREE.MeshBasicMaterial({
-        color: accentHex,
-        transparent: true,
-        opacity: 0.85,
-      });
-      const topBand = new THREE.Mesh(tacticalBandGeo, tacticalBandMat);
-      topBand.position.y = 0.72;
-      const botBand = new THREE.Mesh(tacticalBandGeo, tacticalBandMat);
-      botBand.position.y = -0.72;
-      holoBoxGroup.add(topBand, botBand);
-    }
-
-    // 8 Corner Brackets on the In-Game Holographic Box
-    const cornerMat = new THREE.MeshBasicMaterial({
       color: glowHex,
       transparent: true,
-      opacity: isWeaponPad ? 0.88 : 0.72,
+      opacity: 0.92,
+      side: THREE.DoubleSide,
+      depthWrite: false,
     });
-    const cornerScale = isWeaponPad ? 0.68 : 0.55;
+    const baseRingMesh = new THREE.Mesh(baseGlowRingGeo, baseRingMat);
+    baseRingMesh.position.y = 0.05;
+    padHolder.add(baseRingMesh);
+
+    const baseDiscMat = new THREE.MeshBasicMaterial({
+      color: accentHex,
+      transparent: true,
+      opacity: 0.28,
+      blending: THREE.AdditiveBlending,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    });
+    const baseDiscMesh = new THREE.Mesh(baseInnerDiscGeo, baseDiscMat);
+    baseDiscMesh.position.y = 0.04;
+    padHolder.add(baseDiscMesh);
+
+    // High-Visibility 3D Spinning Cube Floating Above the Track (y = 2.15m)
+    const holoBoxGroup = new THREE.Group();
+    holoBoxGroup.position.y = 2.15;
+
+    // 1. Glowing semi-transparent 3D holographic glass cube faces
+    const holoGlassMat = new THREE.MeshBasicMaterial({
+      color: accentHex,
+      transparent: true,
+      opacity: isWeaponPad ? 0.36 : 0.32,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    const holoGlassCube = new THREE.Mesh(holoCrateGlassGeo, holoGlassMat);
+    holoBoxGroup.add(holoGlassCube);
+
+    // 2. Solid 12-Edge 3D Structural Neon Cube Frame (unmistakable 3D cube silhouette from 200m+ away!)
+    const strutFrameMat = new THREE.MeshBasicMaterial({
+      color: glowHex,
+      transparent: true,
+      opacity: 0.96,
+    });
+    for (const sy of [-1, 1]) {
+      for (const sz of [-1, 1]) {
+        const barX = new THREE.Mesh(holoStrutBarXGeo, strutFrameMat);
+        barX.position.set(0, sy * holoCrateHalf, sz * holoCrateHalf);
+        holoBoxGroup.add(barX);
+      }
+    }
+    for (const sx of [-1, 1]) {
+      for (const sz of [-1, 1]) {
+        const barY = new THREE.Mesh(holoStrutBarYGeo, strutFrameMat);
+        barY.position.set(sx * holoCrateHalf, 0, sz * holoCrateHalf);
+        holoBoxGroup.add(barY);
+      }
+    }
+    for (const sx of [-1, 1]) {
+      for (const sy of [-1, 1]) {
+        const barZ = new THREE.Mesh(holoStrutBarZGeo, strutFrameMat);
+        barZ.position.set(sx * holoCrateHalf, sy * holoCrateHalf, 0);
+        holoBoxGroup.add(barZ);
+      }
+    }
+
+    // 3. Inner 3D octahedral energy core cage inside the spinning cube
+    const holoInnerOctaMat = new THREE.MeshBasicMaterial({
+      color: glowHex,
+      wireframe: true,
+      transparent: true,
+      opacity: 0.72,
+    });
+    const holoInnerOcta = new THREE.Mesh(holoInnerOctaGeo, holoInnerOctaMat);
+    holoBoxGroup.add(holoInnerOcta);
+
+    // 4. 8 Illuminated Chunky 3D Corner Nodes on the Spinning 3D Cube
+    const cornerMat = new THREE.MeshBasicMaterial({
+      color: accentHex,
+    });
     for (const sx of [-1, 1]) {
       for (const sy of [-1, 1]) {
         for (const sz of [-1, 1]) {
           const cb = new THREE.Mesh(cornerBracketGeo, cornerMat);
-          cb.scale.setScalar(cornerScale);
-          cb.position.set(sx * 0.78, sy * 0.78, sz * 0.78);
+          cb.position.set(sx * holoCrateHalf, sy * holoCrateHalf, sz * holoCrateHalf);
           holoBoxGroup.add(cb);
         }
       }
     }
     padHolder.add(holoBoxGroup);
 
-    // 3D Power-Up or Army Weapon Item floating inside the In-Game Box
+    // 3D Power-Up, Bonus, or Weapon Model floating & counter-spinning inside the 3D Cube
     const itemGroup = wType ? create3DWeaponModel(wType) : create3DPowerUpModel(pType);
-    itemGroup.position.y = 1.28;
+    itemGroup.position.y = 2.15;
+    itemGroup.scale.setScalar(isWeaponPad ? 1.55 : 1.45);
     padHolder.add(itemGroup);
     animatedCrystals.push(itemGroup);
 
@@ -2718,104 +3294,65 @@ export function buildTrackAndWorld(
     });
   }
 
-  // Turn Warning Chevron Signs (`>>` along outer curve guardrails, concentrated at Hairpins, Esses, Crest Drop & Banked Sweeper)
-  const signGeo = new THREE.BoxGeometry(2.4, 2.4, 0.3);
-  const signMat = new THREE.MeshBasicMaterial({ map: textures.chevronSignMap });
-  const cityChevronSpecs: Array<{ t: number; side: -1 | 1 }> = [
-    // Opening North Bean Curve
-    { t: 0.055, side: -1 },
-    { t: 0.072, side: -1 },
-    { t: 0.090, side: -1 },
-    // Skyline Crest & Roller-Coaster Drop into Hairpin 1 Braking Zone
-    { t: 0.285, side: -1 },
-    { t: 0.305, side: -1 },
-    { t: 0.325, side: -1 },
-    // Hairpin 1: Shibuya 180° Drift Turn (dense outer wall chevron array for high-speed readability!)
-    { t: 0.342, side: -1 },
-    { t: 0.354, side: -1 },
-    { t: 0.366, side: -1 },
-    { t: 0.378, side: -1 },
-    { t: 0.390, side: -1 },
-    { t: 0.402, side: -1 },
-    // Technical Section: Cyber Esses (alternating outer apex chevrons)
-    { t: 0.422, side: 1 },
-    { t: 0.436, side: 1 },
-    { t: 0.454, side: -1 },
-    { t: 0.468, side: -1 },
-    { t: 0.486, side: 1 },
-    { t: 0.500, side: 1 },
-    // Hairpin 2: Cyberdyne Tight Turn (outer guardrail chevron array)
-    { t: 0.518, side: 1 },
-    { t: 0.532, side: 1 },
-    { t: 0.546, side: 1 },
-    { t: 0.560, side: 1 },
-    { t: 0.574, side: 1 },
-    // High-Speed Banked Megatower Sweeper
-    { t: 0.610, side: 1 },
-    { t: 0.630, side: 1 },
-    { t: 0.650, side: 1 },
-    { t: 0.670, side: 1 },
-    { t: 0.690, side: 1 },
-    // Southern Bean Loop Return
-    { t: 0.875, side: -1 },
-    { t: 0.895, side: -1 },
-    { t: 0.918, side: -1 },
-    { t: 0.942, side: -1 },
-  ];
-  const lavaChevronSpecs: Array<{ t: number; side: -1 | 1 }> = [
-    // Sector 1: Caldera Parabolica Outer Rim
-    { t: 0.062, side: -1 },
-    { t: 0.082, side: -1 },
-    { t: 0.102, side: -1 },
-    { t: 0.118, side: -1 },
-    // Sector 2: Pyroclastic Summit Crest & Roller-Coaster Drop Braking Zone
-    { t: 0.365, side: -1 },
-    { t: 0.388, side: -1 },
-    { t: 0.412, side: -1 },
-    // Sector 2: Hairpin 1 — Southern Caldera 180° Drift Turn (dense outer wall chevron array)
-    { t: 0.432, side: -1 },
-    { t: 0.444, side: -1 },
-    { t: 0.456, side: -1 },
-    { t: 0.468, side: -1 },
-    { t: 0.480, side: -1 },
-    { t: 0.492, side: -1 },
-    // Sector 3: Technical Basalt Serpent Esses (alternating Left-Right-Left apex chevrons)
-    { t: 0.514, side: 1 },
-    { t: 0.528, side: 1 },
-    { t: 0.546, side: -1 },
-    { t: 0.560, side: -1 },
-    { t: 0.578, side: 1 },
-    { t: 0.592, side: 1 },
-    // Sector 3: Hairpin 2 — Northern Obsidian Rim 180° Turn (dense outer wall chevron array)
-    { t: 0.614, side: 1 },
-    { t: 0.626, side: 1 },
-    { t: 0.638, side: 1 },
-    { t: 0.650, side: 1 },
-    { t: 0.662, side: 1 },
-    { t: 0.674, side: 1 },
-    // Sector 3-4: High-Speed Banked Magma Rim Sweeper
-    { t: 0.698, side: 1 },
-    { t: 0.716, side: 1 },
-    { t: 0.734, side: 1 },
-    // Sector 4: Southern Caldera Return
-    { t: 0.892, side: -1 },
-    { t: 0.914, side: -1 },
-    { t: 0.936, side: -1 },
-    { t: 0.958, side: -1 },
-  ];
-  const activeChevronSpecs = isCity ? cityChevronSpecs : lavaChevronSpecs;
-  for (let i = 0; i < activeChevronSpecs.length; i++) {
-    const { t, side } = activeChevronSpecs[i];
+  // ============================================================================
+  // TALL ANIMATED-ARROW CURVE GUARDRAIL WALLS IN PARABOLIC & DIFFICULT CURVES:
+  // - Normal & Parabolic Curves (`severity === 'caution'`): Tall Guardrail Walls with YELLOW Animated Flowing Arrows (>>>)
+  // - Difficult Curves & Sharp Hairpins (`severity === 'hairpin'`): Tall Guardrail Walls with RED Animated Flowing Arrows (>>>)
+  // - No yellow or red arrows are placed on the road surface itself so road decals are exclusively Electric Blue Boost Pads!
+  // ============================================================================
+  const yellowCurveGuardrailMat = createCurveGuardrailArrowWallMaterial(false, isNeon, neonIntensity);
+  const redCurveGuardrailMat = createCurveGuardrailArrowWallMaterial(true, isNeon, neonIntensity);
+  animatedShaders.push(yellowCurveGuardrailMat, redCurveGuardrailMat);
+
+  // Larger, taller Guardrail Arrow Wall Panels (6.4m long x 2.75m tall) mounted along the guardrail in all curves
+  const signGeo = new THREE.BoxGeometry(0.36, 2.75, 6.4);
+  const signFrameGeo = new THREE.BoxGeometry(0.28, 3.05, 6.75);
+
+  // Build comprehensive curve guardrail placements covering every parabolic curve, normal curve, S-bend, and difficult hairpin
+  const curveGuardrailSpecs: Array<{ t: number; side: -1 | 1; severity: 'caution' | 'hairpin' }> = [];
+  const sampleCount = 115;
+  for (let s = 0; s < sampleCount; s++) {
+    const t = Number(((s + 0.5) / sampleCount).toFixed(4));
+    if (t < 0.032 || t > 0.968) continue;
+
+    const kCenter = estimateTrackCurvature(trackId, t);
+    const kPrev = estimateTrackCurvature(trackId, (t - 0.008 + 1) % 1);
+    const kNext = estimateTrackCurvature(trackId, (t + 0.008) % 1);
+    const smoothK = (kPrev + kCenter * 2 + kNext) * 0.25;
+    const absK = Math.abs(smoothK);
+
+    if (absK >= 0.055) {
+      // Positive curvature = right-hand turn (outer guardrail is left = -1); Negative = left-hand turn (outer guardrail is right = +1)
+      const outerSide: -1 | 1 = smoothK >= 0 ? -1 : 1;
+      const severity: 'caution' | 'hairpin' = absK >= 0.30 ? 'hairpin' : 'caution';
+      curveGuardrailSpecs.push({ t, side: outerSide, severity });
+
+      // On intense parabolic sweepers and difficult curves (|k| >= 0.14), also line the inner guardrail so both sides of the curve blaze with animated arrows!
+      if (absK >= 0.14 && s % 2 === 0) {
+        const innerSide: -1 | 1 = outerSide === -1 ? 1 : -1;
+        curveGuardrailSpecs.push({ t, side: innerSide, severity });
+      }
+    }
+  }
+
+  for (let i = 0; i < curveGuardrailSpecs.length; i++) {
+    const { t, side, severity } = curveGuardrailSpecs[i];
     sampleTrackFrame(spline, t, pos, fwd, right, up);
-    const signMesh = new THREE.Mesh(signGeo, signMat);
-    signMesh.position
+
+    const signGrp = new THREE.Group();
+    signGrp.position
       .copy(pos)
-      .addScaledVector(right, side * (halfW + 1.1))
-      .addScaledVector(up, 2.4);
-    lookTarget.copy(signMesh.position).add(fwd);
-    rotMat.lookAt(signMesh.position, lookTarget, up);
-    signMesh.quaternion.setFromRotationMatrix(rotMat);
-    worldGroup.add(signMesh);
+      .addScaledVector(right, side * (halfW + 1.65))
+      .addScaledVector(up, 2.35);
+    lookTarget.copy(signGrp.position).add(fwd);
+    rotMat.lookAt(signGrp.position, lookTarget, up);
+    signGrp.quaternion.setFromRotationMatrix(rotMat);
+
+    const panelMat = severity === 'hairpin' ? redCurveGuardrailMat : yellowCurveGuardrailMat;
+    const signBacking = new THREE.Mesh(signFrameGeo, graphiteStructureMat);
+    const signMesh = new THREE.Mesh(signGeo, panelMat);
+    signGrp.add(signBacking, signMesh);
+    worldGroup.add(signGrp);
   }
 
   // 3D Sector Split Timing Gantries at t = 0.00 (Start/Finish), 0.25 (S2), 0.50 (S3), and 0.75 (S4)
@@ -2922,25 +3459,28 @@ export function ensureTrackClearanceXZ(
   let x = initX;
   let z = initZ;
   const requiredDist = TRACK_HALF_WIDTH + objectRadius + minBuffer;
-  const loopCenterX = 560;
-  const loopCenterZ = -150;
-  // For colossal horizon massifs/domes (requiredDist > 110m), project outside the circuit's bounding ellipse first
-  if (requiredDist > 110) {
-    const ex = (x - loopCenterX) / 860;
-    const ez = (z - loopCenterZ) / 540;
+  const loopCenterX = 710;
+  const loopCenterZ = -135;
+
+  // For colossal horizon massifs/domes (requiredDist > 165m), project outside the extended circuit's bounding envelope first
+  if (requiredDist > 165) {
+    const ex = (x - loopCenterX) / 960;
+    const ez = (z - loopCenterZ) / 680;
     const eNorm = Math.hypot(ex, ez);
-    if (eNorm < 1.12) {
+    if (eNorm < 1.15) {
       const ux = eNorm > 0.001 ? ex / eNorm : 1;
       const uz = eNorm > 0.001 ? ez / eNorm : 0;
-      x = loopCenterX + ux * (860 * 1.16 + objectRadius * 0.45);
-      z = loopCenterZ + uz * (540 * 1.16 + objectRadius * 0.45);
+      x = loopCenterX + ux * (960 * 1.18 + objectRadius * 0.5);
+      z = loopCenterZ + uz * (680 * 1.18 + objectRadius * 0.5);
     }
   }
 
-  for (let iter = 0; iter < 64; iter++) {
+  // Phase 1: Multi-sample repulsive relaxation so points between two figure-8 lobes don't ping-pong onto a neighboring road
+  for (let iter = 0; iter < 85; iter++) {
     let closestDistSq = Infinity;
-    let closestTx = 0;
-    let closestTz = 0;
+    let repulseX = 0;
+    let repulseZ = 0;
+    let violatingCount = 0;
 
     for (let i = 0; i < trackSamples.length; i++) {
       const s = trackSamples[i];
@@ -2949,35 +3489,56 @@ export function ensureTrackClearanceXZ(
       const dSq = dx * dx + dz * dz;
       if (dSq < closestDistSq) {
         closestDistSq = dSq;
-        closestTx = s.x;
-        closestTz = s.z;
+      }
+      if (dSq < requiredDist * requiredDist) {
+        const d = Math.sqrt(dSq) || 0.001;
+        const pen = requiredDist - d + 4.0;
+        repulseX += (dx / d) * pen;
+        repulseZ += (dz / d) * pen;
+        violatingCount++;
       }
     }
 
-    const closestDist = Math.sqrt(closestDistSq);
-    if (closestDist >= requiredDist) {
+    if (closestDistSq >= requiredDist * requiredDist || violatingCount === 0) {
       break;
     }
 
-    // Push directly away from the closest track sample; for large outer massifs, bias outward from the loop centroid
-    // so an object can never be pushed inward across the track corridor
-    let pushDx = x - closestTx;
-    let pushDz = z - closestTz;
-    const outDx = x - loopCenterX;
-    const outDz = z - loopCenterZ;
-    if (requiredDist > 78 && pushDx * outDx + pushDz * outDz < 0) {
-      pushDx = outDx;
-      pushDz = outDz;
+    const avgDx = repulseX / violatingCount;
+    const avgDz = repulseZ / violatingCount;
+    const avgLen = Math.hypot(avgDx, avgDz);
+    if (avgLen > 0.5) {
+      x += avgDx * 0.65;
+      z += avgDz * 0.65;
+    } else {
+      // Caught symmetrically between two nearby track lobes -> eject radially outward from circuit center
+      let outDx = x - loopCenterX;
+      let outDz = z - loopCenterZ;
+      const outLen = Math.hypot(outDx, outDz) || 1;
+      outDx /= outLen;
+      outDz /= outLen;
+      x += outDx * (requiredDist * 1.45 + 32);
+      z += outDz * (requiredDist * 1.45 + 32);
     }
-    let pushLen = Math.hypot(pushDx, pushDz);
-    if (pushLen < 0.001) {
-      pushDx = outDx || 1;
-      pushDz = outDz || 0;
-      pushLen = Math.hypot(pushDx, pushDz) || 1;
+  }
+
+  // Phase 2: Hard mathematical guarantee — if still within requiredDist of ANY track sample, push radially outside the circuit perimeter
+  for (let guardIter = 0; guardIter < 40; guardIter++) {
+    let minDSq = Infinity;
+    for (let i = 0; i < trackSamples.length; i++) {
+      const dx = x - trackSamples[i].x;
+      const dz = z - trackSamples[i].z;
+      const dSq = dx * dx + dz * dz;
+      if (dSq < minDSq) minDSq = dSq;
     }
-    const pushNeeded = Math.max(20, requiredDist - closestDist + 16);
-    x += (pushDx / pushLen) * pushNeeded;
-    z += (pushDz / pushLen) * pushNeeded;
+    if (minDSq >= requiredDist * requiredDist) {
+      break;
+    }
+    let outDx = x - loopCenterX;
+    let outDz = z - loopCenterZ;
+    const outLen = Math.hypot(outDx, outDz) || 1;
+    const stepOut = Math.max(24, requiredDist - Math.sqrt(minDSq) + 18);
+    x += (outDx / outLen) * stepOut;
+    z += (outDz / outLen) * stepOut;
   }
 
   return { x, z };
@@ -3584,13 +4145,13 @@ function buildCityEnvironment(
     const h = inFrontRightVista ? 72 + (i % 38) : 108 + ((i * 43) % 158);
     const rotY = (i * 0.42) % Math.PI;
 
-    const footprintRadius = Math.hypot(w * 1.26, d * 1.26) * 0.58;
+    const footprintRadius = Math.hypot(w * 1.28, d * 1.28) * 0.62;
     const { x: bx, z: bz } = ensureTrackClearanceXZ(
       rawBx,
       rawBz,
       footprintRadius,
       trackSamples,
-      38
+      44
     );
 
     bldTint.setHex(facadeTints[i % facadeTints.length]);
@@ -3681,7 +4242,7 @@ function buildCityEnvironment(
     const radius = 13 + (i % 10);
     const h = inFrontRightVista ? 82 + (i % 36) : 124 + ((i * 39) % 148);
 
-    const { x: ax, z: az } = ensureTrackClearanceXZ(rawAx, rawAz, radius * 1.32, trackSamples, 38);
+    const { x: ax, z: az } = ensureTrackClearanceXZ(rawAx, rawAz, radius * 1.36, trackSamples, 44);
 
     bldTint.setHex(facadeTints[(i + 2) % facadeTints.length]);
     rimTint.setHex(neonRimTints[(i + 1) % neonRimTints.length]);
@@ -3717,7 +4278,7 @@ function buildCityEnvironment(
     const baseR = 28 + (i % 16);
     const h = 168 + ((i * 53) % 128);
 
-    const { x: zx, z: zz } = ensureTrackClearanceXZ(rawZx, rawZz, baseR * 1.28, trackSamples, 42);
+    const { x: zx, z: zz } = ensureTrackClearanceXZ(rawZx, rawZz, baseR * 1.32, trackSamples, 48);
 
     bldTint.setHex(facadeTints[(i + 4) % facadeTints.length]);
     dummy.position.set(zx, -66, zz);
@@ -3931,7 +4492,7 @@ function buildCityEnvironment(
     metalness: 0.78,
   });
 
-  // Helper to construct a framed 3D cyberpunk billboard with armored casing, neon top/bottom trim bars & truss struts
+  // Helper to construct a framed 3D cyberpunk billboard with armored casing, neon perimeter trim bars & truss struts
   const buildFramedBillboardGroup = (
     panel: { u0: number; v0: number; u1: number; v1: number; aspect: number },
     height: number,
@@ -3942,11 +4503,14 @@ function buildCityEnvironment(
     const width = height * panel.aspect;
     const grp = new THREE.Group();
 
-    // Front & rear UV-cropped LED screens
+    // Front & rear UV-cropped animated WebP LED screens (double-sided visibility)
     const screenGeo = createAtlasPanelGeometry(width, height, panel.u0, panel.v0, panel.u1, panel.v1);
     const frontScreen = new THREE.Mesh(screenGeo, cyberAdScreenMat);
     frontScreen.position.z = 0.34;
-    grp.add(frontScreen);
+    const rearScreen = new THREE.Mesh(screenGeo, cyberAdScreenMat);
+    rearScreen.position.z = -0.34;
+    rearScreen.rotation.y = Math.PI;
+    grp.add(frontScreen, rearScreen);
 
     // Beveled Dark Armored Backing Frame (`02_dark_armour_panels`)
     const backingMesh = new THREE.Mesh(
@@ -3955,13 +4519,18 @@ function buildCityEnvironment(
     );
     grp.add(backingMesh);
 
-    // Top & Bottom Glowing Neon Frame Strips (`03_cyan_light_barrier` / `05_magenta_neon_rail`)
+    // Top, Bottom, Left & Right Glowing Neon Frame Strips (`03_cyan_light_barrier` / `05_magenta_neon_rail`)
     const trimMat = useMagentaTrim ? sharedMagentaRailMat : sharedCyanBarrierMat;
-    const topBar = new THREE.Mesh(new THREE.BoxGeometry(width + 1.1, 0.36, 0.72), trimMat);
+    const altTrimMat = useMagentaTrim ? sharedCyanBarrierMat : sharedMagentaRailMat;
+    const topBar = new THREE.Mesh(new THREE.BoxGeometry(width + 1.15, 0.38, 0.74), trimMat);
     topBar.position.set(0, height * 0.5 + 0.48, 0.05);
-    const botBar = new THREE.Mesh(new THREE.BoxGeometry(width + 1.1, 0.36, 0.72), trimMat);
+    const botBar = new THREE.Mesh(new THREE.BoxGeometry(width + 1.15, 0.38, 0.74), trimMat);
     botBar.position.set(0, -height * 0.5 - 0.48, 0.05);
-    grp.add(topBar, botBar);
+    const leftBar = new THREE.Mesh(new THREE.BoxGeometry(0.32, height + 0.65, 0.70), altTrimMat);
+    leftBar.position.set(-width * 0.5 - 0.48, 0, 0.05);
+    const rightBar = new THREE.Mesh(new THREE.BoxGeometry(0.32, height + 0.65, 0.70), altTrimMat);
+    rightBar.position.set(width * 0.5 + 0.48, 0, 0.05);
+    grp.add(topBar, botBar, leftBar, rightBar);
 
     if (withSupportLegs) {
       const legGeo = new THREE.BoxGeometry(0.62, legHeight, 0.68);
@@ -4041,7 +4610,7 @@ function buildCityEnvironment(
       rawBannerZ,
       bannerHalfW,
       trackSamples,
-      20
+      34
     );
     const bannerY = -66 + sp.h * 0.64;
 
@@ -4068,7 +4637,7 @@ function buildCityEnvironment(
         bannerZ - sp.rightZ * sp.side * 1.4,
         lowSignHalfW,
         trackSamples,
-        20
+        34
       );
       lowSignGrp.position.set(safeLowPos.x, lowY, safeLowPos.z);
       lookTarget.set(
@@ -4083,7 +4652,7 @@ function buildCityEnvironment(
 
   // 3B. 6 Colossal Horizon Landmark Twin-Spire Megastructure Complexes framing key circuit vistas!
   const heroVistaT = [0.08, 0.24, 0.41, 0.58, 0.74, 0.90];
-  const heroComplexFootprint = 58;
+  const heroComplexFootprint = 68;
   const megaFacadePanels = [
     DECORATIVE_ATLAS_PANELS.AD_NEO_TOKYO_MOTORS_WIDE,
     DECORATIVE_ATLAS_PANELS.AD_NEO_KOLA_ANDROID,
@@ -4104,7 +4673,7 @@ function buildCityEnvironment(
       rawMz,
       heroComplexFootprint,
       trackSamples,
-      44
+      50
     );
 
     const megaGroup = new THREE.Group();
@@ -4369,9 +4938,9 @@ function buildCityEnvironment(
     const { x: bx, z: bz } = ensureTrackClearanceXZ(
       rawBx,
       rawBz,
-      billWidth * 0.55,
+      billWidth * 0.58,
       trackSamples,
-      6.0
+      15.0
     );
     const by = samplePos.y + spec.elevOffset;
 
@@ -4379,8 +4948,7 @@ function buildCityEnvironment(
       spec.panel,
       spec.height,
       spec.magentaTrim,
-      true,
-      spec.elevOffset + 2.5
+      false
     );
     bbGroup.position.set(bx, by, bz);
 
@@ -4391,6 +4959,116 @@ function buildCityEnvironment(
       .addScaledVector(sampleRight, -spec.side * Math.abs(Math.tan(spec.inwardYaw * 0.75)));
     bbGroup.lookAt(lookTarget);
     worldGroup.add(bbGroup);
+  }
+
+  // 3C-II. Over-Track Animated Cyber-Advertising Gantry Portals spanning the roadway
+  // Showcases all 16 animated WebP advertising panels directly above the player's sightline!
+  const adGantrySpecs: Array<{
+    t: number;
+    leftPanel: { u0: number; v0: number; u1: number; v1: number; aspect: number };
+    rightPanel: { u0: number; v0: number; u1: number; v1: number; aspect: number };
+    leftVertPanel: { u0: number; v0: number; u1: number; v1: number; aspect: number };
+    rightVertPanel: { u0: number; v0: number; u1: number; v1: number; aspect: number };
+  }> = [
+    {
+      t: 0.042,
+      leftPanel: DECORATIVE_ATLAS_PANELS.AD_NEO_KOLA_CAN,
+      rightPanel: DECORATIVE_ATLAS_PANELS.AD_SHIBUYA_DRIFT,
+      leftVertPanel: DECORATIVE_ATLAS_PANELS.VERT_NEO_TOKYO_CYBORG,
+      rightVertPanel: DECORATIVE_ATLAS_PANELS.VERT_NEO_TOKYO_WOMAN_TOP,
+    },
+    {
+      t: 0.145,
+      leftPanel: DECORATIVE_ATLAS_PANELS.AD_NEO_KOLA_ANDROID,
+      rightPanel: DECORATIVE_ATLAS_PANELS.AD_CYBBCORE_ANDROID,
+      leftVertPanel: DECORATIVE_ATLAS_PANELS.VERT_KANJI_NEON,
+      rightVertPanel: DECORATIVE_ATLAS_PANELS.VERT_NEO_TOKYO_CRT,
+    },
+    {
+      t: 0.275,
+      leftPanel: DECORATIVE_ATLAS_PANELS.AD_CYBERNETICS_NOW,
+      rightPanel: DECORATIVE_ATLAS_PANELS.AD_GLITCH_GEAR,
+      leftVertPanel: DECORATIVE_ATLAS_PANELS.VERT_NEO_TOKYO_WOMAN_FULL,
+      rightVertPanel: DECORATIVE_ATLAS_PANELS.VERT_NEO_TOKYO_CYBORG,
+    },
+    {
+      t: 0.395,
+      leftPanel: DECORATIVE_ATLAS_PANELS.AD_NEO_TOKYO_MOTORS_LOGO,
+      rightPanel: DECORATIVE_ATLAS_PANELS.AD_CYBERDYNE_PYRAMID,
+      leftVertPanel: DECORATIVE_ATLAS_PANELS.VERT_NEO_TOKYO_WOMAN_TOP,
+      rightVertPanel: DECORATIVE_ATLAS_PANELS.VERT_KANJI_NEON,
+    },
+    {
+      t: 0.510,
+      leftPanel: DECORATIVE_ATLAS_PANELS.AD_GLITCH_COLA,
+      rightPanel: DECORATIVE_ATLAS_PANELS.AD_CYBERDYNE_SLASH,
+      leftVertPanel: DECORATIVE_ATLAS_PANELS.VERT_NEO_TOKYO_CRT,
+      rightVertPanel: DECORATIVE_ATLAS_PANELS.VERT_NEO_TOKYO_WOMAN_FULL,
+    },
+    {
+      t: 0.635,
+      leftPanel: DECORATIVE_ATLAS_PANELS.AD_NEO_TOKYO_MOTORS_WIDE,
+      rightPanel: DECORATIVE_ATLAS_PANELS.AD_SHIBUYA_DRIFT,
+      leftVertPanel: DECORATIVE_ATLAS_PANELS.VERT_NEO_TOKYO_CYBORG,
+      rightVertPanel: DECORATIVE_ATLAS_PANELS.VERT_KANJI_NEON,
+    },
+    {
+      t: 0.855,
+      leftPanel: DECORATIVE_ATLAS_PANELS.AD_CYBBCORE_ANDROID,
+      rightPanel: DECORATIVE_ATLAS_PANELS.AD_NEO_KOLA_CAN,
+      leftVertPanel: DECORATIVE_ATLAS_PANELS.VERT_NEO_TOKYO_WOMAN_TOP,
+      rightVertPanel: DECORATIVE_ATLAS_PANELS.VERT_NEO_TOKYO_CRT,
+    },
+    {
+      t: 0.945,
+      leftPanel: DECORATIVE_ATLAS_PANELS.AD_GLITCH_GEAR,
+      rightPanel: DECORATIVE_ATLAS_PANELS.AD_CYBERNETICS_NOW,
+      leftVertPanel: DECORATIVE_ATLAS_PANELS.VERT_NEO_TOKYO_WOMAN_FULL,
+      rightVertPanel: DECORATIVE_ATLAS_PANELS.VERT_NEO_TOKYO_CYBORG,
+    },
+  ];
+
+  const gantryPillarSpanX = TRACK_HALF_WIDTH + 3.4;
+  const gantryCrossbarY = 12.2;
+  const gantryPillarGeo = new THREE.BoxGeometry(1.35, gantryCrossbarY + 3.0, 1.45);
+  const gantryBeamGeo = new THREE.BoxGeometry(gantryPillarSpanX * 2 + 2.4, 1.15, 1.35);
+
+  for (let gIdx = 0; gIdx < adGantrySpecs.length; gIdx++) {
+    const gSpec = adGantrySpecs[gIdx];
+    sampleTrackFrame(spline, gSpec.t, samplePos, sampleFwd, sampleRight, sampleUp);
+
+    const gantryGroup = new THREE.Group();
+    gantryGroup.position.copy(samplePos);
+    lookTarget.copy(samplePos).add(sampleFwd);
+    const gRot = new THREE.Matrix4().lookAt(samplePos, lookTarget, sampleUp);
+    gantryGroup.quaternion.setFromRotationMatrix(gRot);
+
+    // Left & Right Armored Gantry Towers outside the track guardrails
+    const leftPillar = new THREE.Mesh(gantryPillarGeo, sharedArmourMat);
+    leftPillar.position.set(-gantryPillarSpanX, gantryCrossbarY * 0.5 - 1.0, 0);
+    const rightPillar = new THREE.Mesh(gantryPillarGeo, sharedArmourMat);
+    rightPillar.position.set(gantryPillarSpanX, gantryCrossbarY * 0.5 - 1.0, 0);
+    const crossBeam = new THREE.Mesh(gantryBeamGeo, sharedArmourMat);
+    crossBeam.position.set(0, gantryCrossbarY, 0);
+    gantryGroup.add(leftPillar, rightPillar, crossBeam);
+
+    // Dual Overhead Landscape Animated Ad Screens suspended from the gantry crossbar
+    const leftOverheadAd = buildFramedBillboardGroup(gSpec.leftPanel, 4.6, gIdx % 2 === 0, false);
+    leftOverheadAd.position.set(-6.4, gantryCrossbarY + 0.3, 0);
+    const rightOverheadAd = buildFramedBillboardGroup(gSpec.rightPanel, 4.6, gIdx % 2 !== 0, false);
+    rightOverheadAd.position.set(6.4, gantryCrossbarY + 0.3, 0);
+    gantryGroup.add(leftOverheadAd, rightOverheadAd);
+
+    // Twin Vertical Animated Portrait Hologram Columns flanking the gantry pillars
+    const leftVertAd = buildFramedBillboardGroup(gSpec.leftVertPanel, 9.8, true, false);
+    leftVertAd.position.set(-gantryPillarSpanX - 2.6, 6.8, 0);
+    leftVertAd.rotation.y = -0.22;
+    const rightVertAd = buildFramedBillboardGroup(gSpec.rightVertPanel, 9.8, false, false);
+    rightVertAd.position.set(gantryPillarSpanX + 2.6, 6.8, 0);
+    rightVertAd.rotation.y = 0.22;
+    gantryGroup.add(leftVertAd, rightVertAd);
+
+    worldGroup.add(gantryGroup);
   }
 
   // 3D. High-Mounted Cantilevered Over-Track Megabillboards with Draping Catenary Power Cables!
@@ -4501,9 +5179,9 @@ function buildCityEnvironment(
     const { x: ex, z: ez } = ensureTrackClearanceXZ(
       rawEx,
       rawEz,
-      elevWidth * 0.55,
+      elevWidth * 0.58,
       trackSamples,
-      8.0
+      16.0
     );
     const ey = samplePos.y + spec.elevY;
 
@@ -4522,15 +5200,22 @@ function buildCityEnvironment(
       .addScaledVector(sampleUp, -Math.tan(spec.downPitch));
     elevGroup.lookAt(lookTarget);
 
-    // Industrial Steel Cantilever Mast & Cross-Arm anchoring the elevated billboard outside the track
-    const mastX = ex + sampleRight.x * spec.side * 5.8;
-    const mastZ = ez + sampleRight.z * spec.side * 5.8;
-    const mastH = spec.elevY + 18;
+    // Industrial Steel Cantilever Mast & Cross-Arm anchoring the elevated billboard safely outside all track spans
+    const rawMastX = ex + sampleRight.x * spec.side * 5.8;
+    const rawMastZ = ez + sampleRight.z * spec.side * 5.8;
+    const { x: mastX, z: mastZ } = ensureTrackClearanceXZ(
+      rawMastX,
+      rawMastZ,
+      2.5,
+      trackSamples,
+      16.0
+    );
+    const mastH = spec.elevY + 4;
     const mastMesh = new THREE.Mesh(
       new THREE.BoxGeometry(1.45, mastH, 1.45),
       sharedArmourMat
     );
-    mastMesh.position.set(mastX, samplePos.y + mastH * 0.5 - 12, mastZ);
+    mastMesh.position.set(mastX, samplePos.y + mastH * 0.5 - 1.5, mastZ);
     worldGroup.add(mastMesh, elevGroup);
 
     // Drape 4 Heavy Catenary Power Cables strictly outward from the billboard to its support mast & outer building line
@@ -4809,12 +5494,22 @@ function buildCityEnvironment(
         innerGlow.position.set(side * (TRACK_HALF_WIDTH + 5.7), 8.2, 0);
         ribGrp.add(pil, innerGlow);
 
-        // Segmented Megatower Support Bastions flanking the curved tunnel well outside the viaduct
+        // Segmented Megatower Support Bastions flanking the curved tunnel well outside all track decks
         if (r % 2 === 0) {
+          const rawBastionX = samplePos.x + sampleRight.x * side * (TRACK_HALF_WIDTH + 46);
+          const rawBastionZ = samplePos.z + sampleRight.z * side * (TRACK_HALF_WIDTH + 46);
+          const safeBastion = ensureTrackClearanceXZ(
+            rawBastionX,
+            rawBastionZ,
+            26,
+            trackSamples,
+            40
+          );
           const bastion = new THREE.Mesh(towerGeo, cyberBuildingShaderMat);
-          bastion.position.set(side * (TRACK_HALF_WIDTH + 26), -110, 0);
-          bastion.scale.set(28, 138, 18);
-          ribGrp.add(bastion);
+          bastion.position.set(safeBastion.x, -66, safeBastion.z);
+          bastion.rotation.y = Math.atan2(sampleFwd.x, sampleFwd.z);
+          bastion.scale.set(28, 108, 18);
+          worldGroup.add(bastion);
         }
       }
       const ceilBeam = new THREE.Mesh(ribCeilingGeo, sharedArmourMat);
@@ -4823,13 +5518,7 @@ function buildCityEnvironment(
       ceilNeon.position.set(0, 16.3, 0);
       ribGrp.add(ceilBeam, ceilNeon);
 
-      // Segmented Upper Megatower Shaft rising cleanly above the tunnel ceiling (+20m above road)
-      if (r % 2 === 0) {
-        const upperTowerSeg = new THREE.Mesh(towerGeo, cyberBuildingShaderMat);
-        upperTowerSeg.position.set(0, 20.0, 0);
-        upperTowerSeg.scale.set(84, 195, 18);
-        ribGrp.add(upperTowerSeg);
-      }
+      // Note: Do not attach a wide 84m tower directly to the banked ribGrp, as banking tilts tall meshes across neighboring curves.
 
       // Entrance & Exit Corporate Portal Signs mounted high above the portal archways
       if (r === 0) {
@@ -4877,12 +5566,22 @@ function buildCityEnvironment(
       corrGrp.quaternion.setFromRotationMatrix(setPieceRotMat);
 
       for (const side of [-1, 1]) {
-        // Flanking High-Rise Curtain-Wall Towers rising beside the corridor
+        // Flanking High-Rise Curtain-Wall Towers rising beside the corridor with full lower-underpass clearance
         if (c % 2 === 0) {
+          const rawTwinX = samplePos.x + sampleRight.x * side * (TRACK_HALF_WIDTH + 52);
+          const rawTwinZ = samplePos.z + sampleRight.z * side * (TRACK_HALF_WIDTH + 52);
+          const safeTwin = ensureTrackClearanceXZ(
+            rawTwinX,
+            rawTwinZ,
+            28,
+            trackSamples,
+            40
+          );
           const twinTower = new THREE.Mesh(towerGeo, cyberBuildingShaderMat);
-          twinTower.position.set(side * (TRACK_HALF_WIDTH + 30), -110, 0);
-          twinTower.scale.set(28, 255, 28);
-          corrGrp.add(twinTower);
+          twinTower.position.set(safeTwin.x, -66, safeTwin.z);
+          twinTower.rotation.y = Math.atan2(sampleFwd.x, sampleFwd.z);
+          twinTower.scale.set(28, 210, 28);
+          worldGroup.add(twinTower);
         }
         // Translucent Cyber-Glass Corridor Side Walls safely outside the guardrails & viaduct apron
         const glassPanel = new THREE.Mesh(glassWallGeo, glassWallMat);
@@ -4907,10 +5606,10 @@ function buildCityEnvironment(
 
     // --- SET-PIECE 3: ELEVATED SKYBRIDGE OVERPASS & PANORAMIC HOLOGRAPHIC WALL (t = 0.785 .. 0.803) ---
     // Crosses at y = 48m directly over Sector 1's Underpass (y = 18m) at (450, -260).
-    // Uses wide-span suspension arch trusses with pillars placed 46m laterally outside so they NEVER touch the lower Underpass!
+    // Uses upper-deck-mounted portal arch pillars (bottom at y = -0.5 on the upper viaduct apron) so zero columns ever drop into the lower Sector 1 Underpass!
     const overpassTrussTs = [0.785, 0.794, 0.803];
-    const archTowerGeo = new THREE.BoxGeometry(3.8, 135, 4.2);
-    const archCrossGeo = new THREE.BoxGeometry(96, 3.8, 4.4);
+    const archTowerGeo = new THREE.BoxGeometry(2.8, 29.0, 3.6);
+    const archCrossGeo = new THREE.BoxGeometry((TRACK_HALF_WIDTH + 5.2) * 2, 3.4, 4.2);
     for (let oIdx = 0; oIdx < overpassTrussTs.length; oIdx++) {
       sampleTrackFrame(spline, overpassTrussTs[oIdx], samplePos, sampleFwd, sampleRight, sampleUp);
       const ovGrp = new THREE.Group();
@@ -4921,27 +5620,27 @@ function buildCityEnvironment(
 
       for (const side of [-1, 1]) {
         const tower = new THREE.Mesh(archTowerGeo, sharedArmourMat);
-        tower.position.set(side * 46, -38, 0);
+        tower.position.set(side * (TRACK_HALF_WIDTH + 4.2), 14.0, 0);
         ovGrp.add(tower);
       }
       const topArch = new THREE.Mesh(archCrossGeo, sharedArmourMat);
       topArch.position.set(0, 28, 0);
       const topArchNeon = new THREE.Mesh(
-        new THREE.BoxGeometry(94, 0.85, 4.8),
+        new THREE.BoxGeometry((TRACK_HALF_WIDTH + 4.8) * 2, 0.85, 4.6),
         oIdx === 1 ? sharedMagentaRailMat : sharedCyanBarrierMat
       );
       topArchNeon.position.set(0, 25.8, 0);
       ovGrp.add(topArch, topArchNeon);
 
-      // Giant Panoramic Billboard Wall running alongside the Skybridge Overpass (at +24m lateral offset)
+      // Giant Panoramic Billboard Wall running alongside the Skybridge Overpass safely outside the upper guardrail
       const wallPanel =
         oIdx === 0
           ? DECORATIVE_ATLAS_PANELS.AD_SHIBUYA_DRIFT
           : oIdx === 1
           ? DECORATIVE_ATLAS_PANELS.AD_NEO_KOLA_ANDROID
           : DECORATIVE_ATLAS_PANELS.AD_NEO_TOKYO_MOTORS_WIDE;
-      const panoSign = buildFramedBillboardGroup(wallPanel, 13.5, oIdx % 2 === 0, false);
-      panoSign.position.set(-28, 12.5, 0);
+      const panoSign = buildFramedBillboardGroup(wallPanel, 12.0, oIdx % 2 === 0, false);
+      panoSign.position.set(-(TRACK_HALF_WIDTH + 10.5), 12.5, 0);
       panoSign.rotation.y = Math.PI * 0.42;
       ovGrp.add(panoSign);
 
@@ -4959,8 +5658,8 @@ function buildCityEnvironment(
 
     for (let g = 0; g < 26; g++) {
       const t = ((g + 0.45) / 26) % 1;
-      // Skip placing standard gantries inside the Skyscraper Core Tunnel (t = 0.70..0.79)
-      if (t >= 0.70 && t <= 0.79) continue;
+      // Skip placing standard gantries inside the Skyscraper Core Tunnel & Skybridge Overpass (t = 0.70..0.82)
+      if (t >= 0.70 && t <= 0.82) continue;
       sampleTrackFrame(spline, t, samplePos, sampleFwd, sampleRight, sampleUp);
       const gantryGroup = new THREE.Group();
       gantryGroup.position.copy(samplePos);

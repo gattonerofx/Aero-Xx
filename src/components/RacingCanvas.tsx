@@ -71,11 +71,14 @@ interface RacingCanvasProps {
   onToggleCameraPause: () => void;
   onOpenDebugMenu: () => void;
   onCycleCamera: () => void;
+  onTakeControl?: () => void;
   actionTriggerRef: React.MutableRefObject<{
     boostPulse: boolean;
     useBonus: boolean;
     useWeapon: boolean;
     steerDir: number;
+    throttleHeld?: boolean;
+    brakeHeld?: boolean;
   }>;
 }
 
@@ -106,7 +109,7 @@ const _camFwdXZ = new THREE.Vector3();
 const SPARK_POOL_SIZE = 110;
 const THRUSTER_SPARK_POOL_SIZE = 200;
 const HEAT_HAZE_POOL_SIZE = 100;
-const WEATHER_POOL_SIZE = 360;
+const WEATHER_POOL_SIZE = 760;
 const DEBRIS_POOL_SIZE = 320;
 
 interface SparkParticle {
@@ -163,6 +166,7 @@ interface WeatherDrop {
   driftPhase: number;
   scale: number;
   isEmber: boolean;
+  layer: 0 | 1 | 2;
 }
 
 interface TrackDebrisParticle {
@@ -200,6 +204,7 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
   onToggleCameraPause,
   onOpenDebugMenu,
   onCycleCamera,
+  onTakeControl,
   actionTriggerRef,
 }) => {
   const mountRef = useRef<HTMLDivElement | null>(null);
@@ -237,6 +242,7 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
     onToggleCameraPause,
     onOpenDebugMenu,
     onCycleCamera,
+    onTakeControl,
   });
   callbacksRef.current = {
     onTelemetryUpdate,
@@ -246,6 +252,7 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
     onToggleCameraPause,
     onOpenDebugMenu,
     onCycleCamera,
+    onTakeControl,
   };
 
   const rebuildSceneRef = useRef<(() => void) | null>(null);
@@ -615,9 +622,103 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
     motionLinesPass.enabled = settingsRef.current.enableMotionLines;
     composer.addPass(motionLinesPass);
 
+    // Screen-Space Cyber Monsoon Rain & Purple Storm Lightning Atmosphere Pass (City Circuit)
+    const stormRainPass = new ShaderPass({
+      uniforms: {
+        tDiffuse: { value: null },
+        uTime: { value: 0 },
+        uRainIntensity: { value: 0 },
+        uLightningFlash: { value: 0 },
+        uDistantFlash: { value: 0 },
+        uAspect: { value: initW / initH },
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform sampler2D tDiffuse;
+        uniform float uTime;
+        uniform float uRainIntensity;
+        uniform float uLightningFlash;
+        uniform float uDistantFlash;
+        uniform float uAspect;
+        varying vec2 vUv;
+
+        float hash12(vec2 p) {
+          vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+          p3 += dot(p3, p3.yzx + 33.33);
+          return fract((p3.x + p3.y) * p3.z);
+        }
+
+        float rainStreakLayer(vec2 uv, float scaleX, float scaleY, float speed, float slant, float seed) {
+          vec2 p = vec2(uv.x * uAspect + uv.y * slant, uv.y);
+          vec2 grid = p * vec2(scaleX, scaleY);
+          float colId = floor(grid.x);
+          float h = hash12(vec2(colId, seed));
+          float dropSpeed = speed * (0.78 + h * 0.45);
+          float yScroll = grid.y + uTime * dropSpeed + h * 19.7;
+          float rowId = floor(yScroll);
+          float cellH = hash12(vec2(colId * 13.1 + seed, rowId * 7.3));
+          float xFract = abs(fract(grid.x) - 0.5) * 2.0;
+          float yFract = fract(yScroll);
+          float needle = smoothstep(0.15, 0.88, yFract) * (1.0 - smoothstep(0.88, 0.99, yFract));
+          float width = smoothstep(0.62, 0.0, xFract);
+          return needle * width * step(0.54, cellH);
+        }
+
+        void main() {
+          vec4 baseTex = texture2D(tDiffuse, vUv);
+          if (uRainIntensity <= 0.01 && uLightningFlash <= 0.005 && uDistantFlash <= 0.005) {
+            gl_FragColor = baseTex;
+            return;
+          }
+
+          // Subtle peripheral wet-lens micro-refraction from slanted storm rain
+          float centerDist = length((vUv - vec2(0.5, 0.48)) * vec2(uAspect * 0.7, 1.0));
+          float periphMask = smoothstep(0.18, 0.85, centerDist);
+
+          float slant = 0.17 + sin(uTime * 0.65) * 0.04;
+          float layerFar = rainStreakLayer(vUv, 96.0, 4.2, 7.8, slant, 1.7);
+          float layerMid = rainStreakLayer(vUv, 58.0, 2.8, 10.5, slant * 1.12, 5.3) * (0.45 + 0.55 * periphMask);
+          float layerNear = rainStreakLayer(vUv, 32.0, 1.7, 14.2, slant * 1.25, 11.9) * periphMask;
+
+          float combinedRain = (layerFar * 0.36 + layerMid * 0.55 + layerNear * 0.75) * uRainIntensity;
+
+          // Subtle wet-lens UV shimmer along rain streaks
+          vec2 refractUv = clamp(vUv + vec2(slant, -1.0) * combinedRain * 0.0018, vec2(0.001), vec2(0.999));
+          vec3 col = mix(baseTex.rgb, texture2D(tDiffuse, refractUv).rgb, 0.55);
+
+          // Rain streak color: cool ice-cyan mixed with electric purple-violet storm reflections
+          vec3 rainTint = mix(
+            vec3(0.58, 0.88, 1.0),
+            vec3(0.90, 0.55, 1.0),
+            clamp(vUv.y * 0.65 + uLightningFlash * 0.65 + uDistantFlash * 0.35, 0.0, 1.0)
+          );
+          col += rainTint * combinedRain * (0.20 + uLightningFlash * 0.25);
+
+          // Upper sky & wet roadway purple-violet atmospheric flash during thunder/lightning
+          float skyWeight = smoothstep(0.28, 0.96, vUv.y);
+          float roadReflectWeight = smoothstep(0.45, 0.02, vUv.y) * 0.42;
+          vec3 purpleStormGlow = vec3(0.76, 0.26, 0.98);
+          vec3 whiteVioletCore = vec3(0.95, 0.82, 1.0);
+
+          col += purpleStormGlow * uDistantFlash * (skyWeight * 0.22 + roadReflectWeight * 0.12);
+          col += mix(purpleStormGlow, whiteVioletCore, 0.45) * uLightningFlash * (skyWeight * 0.42 + roadReflectWeight * 0.28);
+
+          gl_FragColor = vec4(col, baseTex.a);
+        }
+      `,
+    });
+    stormRainPass.enabled = isCityTrack(settingsRef.current.trackId);
+    composer.addPass(stormRainPass);
+
     composer.addPass(new OutputPass());
 
-    // 3-Point Studio & Atmospheric Lighting Rig
+    // 3-Point Studio & Atmospheric Lighting Rig + Dynamic Purple Lightning PointLight
     const hemiLight = new THREE.HemisphereLight(0x38bdf8, 0x1e1b4b, 0.68);
     scene.add(hemiLight);
 
@@ -629,6 +730,253 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
     const rimLight = new THREE.DirectionalLight(0x00f2fe, 0.48);
     rimLight.position.set(-100, 60, 140);
     scene.add(rimLight);
+
+    const stormLightningLight = new THREE.PointLight(0xd946ef, 0.0, 950, 1.15);
+    stormLightningLight.position.set(0, 140, -220);
+    scene.add(stormLightningLight);
+
+    // 3D City Storm Sky Vortex, Volumetric Storm Cloud Canopy & Jagged Purple Lightning Bolt Rig
+    const stormSkyGroup = new THREE.Group();
+    scene.add(stormSkyGroup);
+
+    // 1. Overhead Churning Storm Cloud Canopy Dome (1600m x 1600m above the city skyline)
+    const stormCanopyGeo = new THREE.PlaneGeometry(1650, 1650, 1, 1);
+    stormCanopyGeo.rotateX(Math.PI / 2);
+    const stormCanopyMat = new THREE.ShaderMaterial({
+      uniforms: {
+        uTime: { value: 0 },
+        uCloudDensity: { value: 0.94 },
+        uSheetFlash: { value: 0.0 },
+        uBoltFlash: { value: 0.0 },
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform float uTime;
+        uniform float uCloudDensity;
+        uniform float uSheetFlash;
+        uniform float uBoltFlash;
+        varying vec2 vUv;
+
+        float hash(vec2 p) {
+          return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+        }
+
+        float noise(vec2 p) {
+          vec2 i = floor(p);
+          vec2 f = fract(p);
+          f = f * f * (3.0 - 2.0 * f);
+          return mix(
+            mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x),
+            mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x),
+            f.y
+          );
+        }
+
+        float fbm(vec2 p) {
+          float v = 0.0;
+          float a = 0.5;
+          mat2 rot = mat2(0.8, -0.6, 0.6, 0.8);
+          for (int i = 0; i < 5; i++) {
+            v += a * noise(p);
+            p = rot * p * 2.04 + vec2(uTime * 0.04, -uTime * 0.03);
+            a *= 0.5;
+          }
+          return v;
+        }
+
+        void main() {
+          vec2 p = (vUv - 0.5) * 2.0;
+          float r = length(p);
+          if (r > 1.0) discard;
+
+          float radialFade = 1.0 - smoothstep(0.45, 0.98, r);
+          float angle = atan(p.y, p.x);
+          vec2 swirlUv = p * 3.8 + vec2(cos(angle + uTime * 0.12), sin(angle + uTime * 0.12)) * 0.45;
+          float n1 = fbm(swirlUv);
+          float n2 = fbm(swirlUv * 2.1 - vec2(uTime * 0.11, uTime * 0.08));
+          float cloud = smoothstep(0.22, 0.85, n1 * 0.65 + n2 * 0.35);
+
+          vec3 darkCloud = vec3(0.04, 0.015, 0.09);
+          vec3 bruiseViolet = vec3(0.24, 0.06, 0.44);
+          vec3 neonPurple = vec3(0.68, 0.18, 0.95);
+          vec3 hotCore = vec3(0.96, 0.82, 1.0);
+
+          float sheetPocket = smoothstep(0.58, 0.88, n2) * (uSheetFlash * 0.85 + uBoltFlash * 1.15);
+          vec3 col = mix(darkCloud, bruiseViolet, cloud);
+          col = mix(col, neonPurple, clamp(cloud * 0.48 + sheetPocket * 0.65, 0.0, 1.0));
+          col += hotCore * sheetPocket * 0.55;
+
+          float alpha = radialFade * (0.45 + 0.48 * cloud) * uCloudDensity;
+          gl_FragColor = vec4(col, alpha);
+        }
+      `,
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    const stormCanopyMesh = new THREE.Mesh(stormCanopyGeo, stormCanopyMat);
+    stormSkyGroup.add(stormCanopyMesh);
+
+    // 2. Swirling Purple Storm Vortex & Tearing Vertical Purple Lightning Bolt Sky Backdrop
+    // Matches the dramatic swirling purple sky vortex + central jagged lightning bolt in the reference image
+    const stormVortexGeo = new THREE.PlaneGeometry(520, 340, 1, 1);
+    const stormVortexMat = new THREE.ShaderMaterial({
+      uniforms: {
+        uTime: { value: 0 },
+        uStormIntensity: { value: 0.92 },
+        uSheetFlash: { value: 0.0 },
+        uBoltFlash: { value: 0.0 },
+        uBoltSeed: { value: 1.37 },
+        uBoltXOffset: { value: 0.0 },
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform float uTime;
+        uniform float uStormIntensity;
+        uniform float uSheetFlash;
+        uniform float uBoltFlash;
+        uniform float uBoltSeed;
+        uniform float uBoltXOffset;
+        varying vec2 vUv;
+
+        float hash(vec2 p) {
+          return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+        }
+
+        float noise(vec2 p) {
+          vec2 i = floor(p);
+          vec2 f = fract(p);
+          f = f * f * (3.0 - 2.0 * f);
+          return mix(
+            mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x),
+            mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x),
+            f.y
+          );
+        }
+
+        float fbm(vec2 p) {
+          float v = 0.0;
+          float a = 0.5;
+          mat2 rot = mat2(0.8, -0.6, 0.6, 0.8);
+          for (int i = 0; i < 5; i++) {
+            v += a * noise(p);
+            p = rot * p * 2.05;
+            a *= 0.5;
+          }
+          return v;
+        }
+
+        float boltNoise(float y, float seed) {
+          float i = floor(y);
+          float f = fract(y);
+          float a = fract(sin(i * 127.1 + seed * 311.7) * 43758.5453) * 2.0 - 1.0;
+          float b = fract(sin((i + 1.0) * 127.1 + seed * 311.7) * 43758.5453) * 2.0 - 1.0;
+          return mix(a, b, f * f * (3.0 - 2.0 * f));
+        }
+
+        float jaggedDisplacement(float y, float seed) {
+          return boltNoise(y * 7.0, seed) * 0.042 +
+                 boltNoise(y * 19.0, seed + 4.1) * 0.019 +
+                 boltNoise(y * 43.0, seed + 9.7) * 0.008;
+        }
+
+        void main() {
+          // Soft oval vignette so the sky vortex blends seamlessly into the night sky and city horizon
+          vec2 eyeCenter = vec2(0.5 + uBoltXOffset * 0.35, 0.74);
+          vec2 rel = (vUv - eyeCenter) * vec2(1.35, 1.0);
+          float distFromEye = length(rel);
+          float edgeMask = (1.0 - smoothstep(0.32, 0.72, length((vUv - vec2(0.5, 0.55)) * vec2(1.05, 1.15)))) *
+                           smoothstep(0.01, 0.16, vUv.y);
+          if (edgeMask <= 0.002) discard;
+
+          // Swirling concentric supercell vortex clouds around eyeCenter
+          float angle = atan(rel.y, rel.x);
+          float swirlAngle = angle + 2.8 / (distFromEye + 0.16) - uTime * 0.55;
+          vec2 vortexUv = vec2(cos(swirlAngle), sin(swirlAngle)) * (distFromEye * 3.6) + distFromEye * 4.5;
+          float cloudFbm = fbm(vortexUv + vec2(uTime * 0.12, -uTime * 0.09));
+          float spiralRing = 0.5 + 0.5 * sin(distFromEye * 22.0 - angle * 2.0 - uTime * 1.8 + cloudFbm * 3.5);
+          float vortexStructure = smoothstep(0.18, 0.88, cloudFbm * 0.68 + spiralRing * 0.32);
+
+          // Vortex Eye glow at the top-center of the storm
+          float eyeCore = exp(-distFromEye * 9.5) * (0.65 + 0.35 * sin(uTime * 3.2) + uSheetFlash * 0.9 + uBoltFlash * 1.8);
+          float innerWallGlow = exp(-abs(distFromEye - 0.11) * 14.0) * vortexStructure * (0.6 + uSheetFlash * 0.8 + uBoltFlash * 1.2);
+
+          vec3 deepAbyssPurple = vec3(0.08, 0.02, 0.16);
+          vec3 stormViolet = vec3(0.36, 0.08, 0.62);
+          vec3 electricMagenta = vec3(0.78, 0.22, 0.98);
+          vec3 blindingWhiteViolet = vec3(0.98, 0.90, 1.0);
+
+          vec3 skyCol = mix(deepAbyssPurple, stormViolet, vortexStructure);
+          skyCol = mix(skyCol, electricMagenta, clamp(innerWallGlow * 0.85 + vortexStructure * 0.32 * (0.5 + uSheetFlash), 0.0, 1.0));
+          skyCol += blindingWhiteViolet * eyeCore * 0.95;
+
+          // Distant cloud-to-cloud sheet lightning pockets
+          float distantPocket = smoothstep(0.62, 0.89, cloudFbm) * exp(-distFromEye * 2.4) * uSheetFlash;
+          skyCol += mix(electricMagenta, blindingWhiteViolet, 0.5) * distantPocket * 1.15;
+
+          float boltAlpha = 0.0;
+          if (uBoltFlash > 0.01 && vUv.y <= eyeCenter.y + 0.04) {
+            // Main Vertical Jagged Purple Lightning Trunk tearing down from the Vortex Eye
+            float normY = clamp((eyeCenter.y - vUv.y) / eyeCenter.y, 0.0, 1.0);
+            float trunkX = eyeCenter.x + jaggedDisplacement(vUv.y, uBoltSeed) * smoothstep(0.0, 0.12, normY);
+            float dxTrunk = abs(vUv.x - trunkX);
+            float vertMask = smoothstep(0.01, 0.08, vUv.y) * smoothstep(eyeCenter.y + 0.03, eyeCenter.y - 0.02, vUv.y);
+
+            float trunkCore = smoothstep(0.0075, 0.0012, dxTrunk) * vertMask;
+            float trunkInnerGlow = exp(-dxTrunk * 52.0) * vertMask;
+            float trunkOuterCorona = exp(-dxTrunk * 14.0) * vertMask;
+
+            // Forked Secondary Lightning Branches
+            float branchesCore = 0.0;
+            float branchesGlow = 0.0;
+            for (int b = 0; b < 5; b++) {
+              float fb = float(b);
+              float branchStartNorm = 0.16 + fb * 0.15;
+              float branchYStart = eyeCenter.y * (1.0 - branchStartNorm);
+              if (vUv.y < branchYStart) {
+                float bProg = (branchYStart - vUv.y) / max(0.08, branchYStart);
+                float side = mod(fb, 2.0) < 0.5 ? -1.0 : 1.0;
+                float bOriginX = eyeCenter.x + jaggedDisplacement(branchYStart, uBoltSeed);
+                float bTargetX = bOriginX + side * bProg * (0.11 + 0.03 * fb) + jaggedDisplacement(vUv.y * 1.4, uBoltSeed + fb * 7.3) * 0.75;
+                float dxB = abs(vUv.x - bTargetX);
+                float bFade = (1.0 - smoothstep(0.35, 0.92, bProg)) * vertMask;
+                branchesCore += smoothstep(0.0045, 0.0008, dxB) * bFade;
+                branchesGlow += exp(-dxB * 68.0) * bFade * 0.85;
+              }
+            }
+
+            vec3 boltCol =
+              electricMagenta * (trunkOuterCorona * 1.25 + branchesGlow * 0.95) +
+              vec3(0.92, 0.55, 1.0) * (trunkInnerGlow * 1.45 + branchesGlow * 0.8) +
+              blindingWhiteViolet * clamp(trunkCore * 2.1 + branchesCore * 1.5, 0.0, 2.2);
+
+            skyCol += boltCol * uBoltFlash;
+            boltAlpha = clamp((trunkOuterCorona * 0.85 + trunkInnerGlow + branchesGlow) * uBoltFlash, 0.0, 1.0);
+          }
+
+          float totalAlpha = clamp(edgeMask * (0.48 + vortexStructure * 0.38 + eyeCore * 0.45) * uStormIntensity + boltAlpha * edgeMask, 0.0, 0.96);
+          gl_FragColor = vec4(skyCol, totalAlpha);
+        }
+      `,
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    const stormVortexMesh = new THREE.Mesh(stormVortexGeo, stormVortexMat);
+    stormSkyGroup.add(stormVortexMesh);
 
     // Pooled Collision Spark Particle InstancedMesh (Orange-Gold Wall/Craft Impact Sparks)
     const sparkGeo = new THREE.BoxGeometry(0.06, 0.06, 0.38);
@@ -795,26 +1143,27 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
     scene.add(weatherInstanced);
 
     const weatherDrops: WeatherDrop[] = Array.from({ length: WEATHER_POOL_SIZE }, (_, idx) => ({
-      rx: ((idx * 29.3) % 88) - 44,
-      ry: ((idx * 17.1) % 36) - 18,
-      rz: ((idx * 41.7) % 88) - 44,
-      speedY: 0.85 + (idx % 7) * 0.14,
+      rx: ((idx * 29.3) % 96) - 48,
+      ry: ((idx * 17.1) % 40) - 20,
+      rz: ((idx * 41.7) % 96) - 48,
+      speedY: 0.88 + (idx % 9) * 0.15,
       driftPhase: idx * 0.43,
-      scale: 0.72 + (idx % 5) * 0.14,
+      scale: 0.78 + (idx % 6) * 0.16,
       isEmber: idx % 2 === 0,
+      layer: (idx % 3) as 0 | 1 | 2,
     }));
 
     const syncWeatherPalette = () => {
       const isCity = isCityTrack(settingsRef.current.trackId);
+      const cityStormPalette = [0xa5f3fc, 0x38bdf8, 0xe0f2fe, 0xc084fc, 0xe879f9];
+      const lavaPalette = [0xfef08a, 0xff9500, 0xff5500, 0xf97316];
       for (let i = 0; i < WEATHER_POOL_SIZE; i++) {
-        const drop = weatherDrops[i];
         if (isCity) {
-          // Cool Neon Rain Streaks (ice-cyan & electric sky-blue)
-          _weatherColor.setHex(drop.isEmber ? 0xa5f3fc : 0x38bdf8);
+          // Storm-lit Neon Rain Streaks (ice-cyan, sky-blue & electric purple-violet storm highlights)
+          _weatherColor.setHex(cityStormPalette[i % cityStormPalette.length]);
         } else {
-          // Fine Glowing Magma Embers & Volcanic Sparks (gold, fiery orange, and deep magma amber — zero white confetti blocks!)
-          const palette = [0xfef08a, 0xff9500, 0xff5500, 0xf97316];
-          _weatherColor.setHex(palette[i % palette.length]);
+          // Fine Glowing Magma Embers & Volcanic Sparks
+          _weatherColor.setHex(lavaPalette[i % lavaPalette.length]);
         }
         weatherInstanced.setColorAt(i, _weatherColor);
       }
@@ -960,16 +1309,31 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
     let racers: RacerState[] = [];
     let shipRigs: ShipMeshRig[] = [];
 
-    // Pre-race Timeline Constants:
-    // Start directly in the Default Player View with a snappy 2.4s 3... 2... 1... ENGAGE! Countdown
-    const INTRO_TOTAL_SEC = 2.4;
-    const LOCK_START_SEC = 2.4;
-    const COUNTDOWN_START_SEC = 2.4;
+    // Pre-race Choreographed Storm Cutscene Timeline Constants:
+    // On the City circuit:
+    //   8.4s -> 4.8s: Lengthened Panoramic Storm Sweep with distant cloud lightning & thunder
+    //   4.8s -> 4.05s: Smooth swoop into stabilized player game view
+    //   4.05s -> 3.0s: Camera stabilized in game view -> Thunder rumbles -> Purple lightning bolt tears through the sky!
+    //   3.0s -> 0.0s: 3 - 2 - 1 - GO! Countdown
+    // (Pressing Shift/Space or holding any steering/throttle key for > 0.2s skips immediately to racing!)
+    const CITY_INTRO_TOTAL_SEC = 8.4;
+    const CITY_LOCK_START_SEC = 4.8;
+    const CITY_STABILIZED_SEC = 4.05;
+    const CITY_COUNTDOWN_START_SEC = 3.0;
+
+    let INTRO_TOTAL_SEC = isCityTrack(settingsRef.current.trackId) ? CITY_INTRO_TOTAL_SEC : 0.0;
+    let LOCK_START_SEC = isCityTrack(settingsRef.current.trackId) ? CITY_LOCK_START_SEC : 0.0;
+    let STABILIZED_VIEW_SEC = isCityTrack(settingsRef.current.trackId) ? CITY_STABILIZED_SEC : 0.0;
+    let COUNTDOWN_START_SEC = isCityTrack(settingsRef.current.trackId) ? CITY_COUNTDOWN_START_SEC : 0.0;
 
     let raceElapsedMs = 0;
     let countdownTimer = INTRO_TOTAL_SEC;
     let introAnnounced = false;
     let preCountdownLockPlayed = false;
+    let introDistantThunderPlayed = false;
+    let preCountdownThunderPlayed = false;
+    let preCountdownLightningPlayed = false;
+    let manualDriveSkipTimer = 0;
     let lastCountdownInt = 4;
     let countdownFovKick = 0;
     let statusBanner = 'CIRCUIT OVERVIEW';
@@ -985,6 +1349,23 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
     let powerUpsCollectedCount = 0;
     let baseFogDensity = 0.00115;
     const disabledPadIds = new Set<number>();
+
+    // Dynamic Storm Clouds, Distant Sheet Lightning & Visible Purple Lightning Bolt State
+    let distantSheetFlash = 0;
+    let lightningBoltFlash = 0;
+    let lightningBoltSeed = 1.37;
+    let lightningBoltXOffset = 0.0;
+    let nextStormEventTimer = 4.5;
+    let pendingThunderDelay = -1;
+    let nextStormIsFullBolt = false;
+
+    const triggerPurpleLightningBolt = (intensity = 1.15, xOffset = 0.0) => {
+      lightningBoltFlash = intensity;
+      distantSheetFlash = Math.max(distantSheetFlash, intensity * 0.85);
+      lightningBoltSeed = 1.1 + Math.random() * 19.7;
+      lightningBoltXOffset = xOffset;
+      audioEngine.playLightningStrike(intensity);
+    };
 
     // Active Ordnance & Vehicle Destruction State
     let activeMissiles: ActiveMissile[] = [];
@@ -1189,7 +1570,7 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
     const smoothedCamFwd = new THREE.Vector3(0, 0, -1);
     const smoothedCamRight = new THREE.Vector3(1, 0, 0);
     const smoothedCamUp = new THREE.Vector3(0, 1, 0);
-    let smoothedCamLateral = 2.6;
+    let smoothedCamLateral = 0;
     const _overviewPos = new THREE.Vector3();
     const _overviewLook = new THREE.Vector3();
     const _chasePos = new THREE.Vector3();
@@ -1217,11 +1598,12 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
     let justPressedWeapon = false;
     let justPressedShift = false;
 
-    // Mouse Drag / Pan / Wheel Zoom Tracking for Debug & Camera-Pause Inspection
+    // Mouse Drag / Pan / Wheel Zoom Tracking for Debug & Camera-Pause Inspection + Live Pointer Steer
     let isDragging = false;
     let dragButton = 0;
     let lastPointerX = 0;
     let lastPointerY = 0;
+    let pointerSteerDir = 0;
 
     const onPointerDown = (e: MouseEvent) => {
       window.focus();
@@ -1269,11 +1651,17 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
           orbitYaw -= dx * 0.0075;
           orbitPitch = THREE.MathUtils.clamp(orbitPitch + dy * 0.006, -0.25, 1.42);
         }
+      } else if (gameStateRef.current === 'playing' && dragButton === 0) {
+        // Live racing horizontal pointer-drag steering across the track width
+        if (Math.abs(dx) > 1.2) {
+          pointerSteerDir = dx < 0 ? -1 : 1;
+        }
       }
     };
 
     const onPointerUp = () => {
       isDragging = false;
+      pointerSteerDir = 0;
     };
 
     const onWheel = (e: WheelEvent) => {
@@ -1309,22 +1697,144 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
     domElem.addEventListener('wheel', onWheel, { passive: false });
     domElem.addEventListener('contextmenu', onContextMenu);
 
+    const handledKeyDownEvents = new WeakSet<KeyboardEvent>();
+    const handledKeyUpEvents = new WeakSet<KeyboardEvent>();
+
+    const extractCanonicalCodes = (e: KeyboardEvent): string[] => {
+      const codes: string[] = [];
+      if (e.code) {
+        codes.push(e.code);
+      }
+      const rawKey = e.key;
+      if (rawKey) {
+        const lower = rawKey.toLowerCase();
+        switch (lower) {
+          case 'arrowup':
+          case 'up':
+            codes.push('ArrowUp');
+            break;
+          case 'arrowdown':
+          case 'down':
+            codes.push('ArrowDown');
+            break;
+          case 'arrowleft':
+          case 'left':
+            codes.push('ArrowLeft');
+            break;
+          case 'arrowright':
+          case 'right':
+            codes.push('ArrowRight');
+            break;
+          case 'w':
+            codes.push('KeyW');
+            break;
+          case 'a':
+            codes.push('KeyA');
+            break;
+          case 's':
+            codes.push('KeyS');
+            break;
+          case 'd':
+            codes.push('KeyD');
+            break;
+          case 'q':
+            codes.push('KeyQ');
+            break;
+          case 'e':
+            codes.push('KeyE');
+            break;
+          case 'z':
+            codes.push('KeyZ');
+            break;
+          case 'f':
+            codes.push('KeyF');
+            break;
+          case 'c':
+            codes.push('KeyC');
+            break;
+          case 'p':
+            codes.push('KeyP');
+            break;
+          case 'k':
+            codes.push('KeyK');
+            break;
+          case 'r':
+            codes.push('KeyR');
+            break;
+          case 'x':
+            codes.push('KeyX');
+            break;
+          case ' ':
+          case 'spacebar':
+            codes.push('Space');
+            break;
+          case 'shift':
+            codes.push('ShiftLeft');
+            break;
+          case 'enter':
+            codes.push('Enter');
+            break;
+          case 'escape':
+          case 'esc':
+            codes.push('Escape');
+            break;
+          default:
+            break;
+        }
+      }
+      return Array.from(new Set(codes));
+    };
+
+    const MOVEMENT_KEYS = new Set([
+      'ArrowUp',
+      'ArrowDown',
+      'ArrowLeft',
+      'ArrowRight',
+      'w',
+      'a',
+      's',
+      'd',
+      'W',
+      'A',
+      'S',
+      'D',
+      ' ',
+    ]);
+
+    const MOVEMENT_CODES = new Set([
+      'ArrowUp',
+      'ArrowDown',
+      'ArrowLeft',
+      'ArrowRight',
+      'KeyW',
+      'KeyA',
+      'KeyS',
+      'KeyD',
+      'Space',
+    ]);
+
     const onKeyDown = (e: KeyboardEvent) => {
-      const code = e.code;
+      if (handledKeyDownEvents.has(e)) return;
+      handledKeyDownEvents.add(e);
+
+      const codes = extractCanonicalCodes(e);
+      const primaryCode = codes[0] ?? '';
       const nowMs = performance.now();
 
-      if (code === 'KeyK' || code === 'KeyE' || code === 'KeyS') {
-        debugKeyTimes[code] = nowMs;
+      for (let i = 0; i < codes.length; i++) {
+        const c = codes[i];
+        if (c === 'KeyK' || c === 'KeyE' || c === 'KeyS') {
+          debugKeyTimes[c] = nowMs;
+        }
+        keysPressed.add(c);
       }
-
-      keysPressed.add(code);
 
       // Check Secret Debug Menu activation chord: K + E + S pressed together
       const kActive = keysPressed.has('KeyK') || nowMs - debugKeyTimes.KeyK < 700;
       const eActive = keysPressed.has('KeyE') || nowMs - debugKeyTimes.KeyE < 700;
       const sActive = keysPressed.has('KeyS') || nowMs - debugKeyTimes.KeyS < 700;
       if (
-        (code === 'KeyK' || code === 'KeyE' || code === 'KeyS') &&
+        (codes.includes('KeyK') || codes.includes('KeyE') || codes.includes('KeyS')) &&
         kActive &&
         eActive &&
         sActive
@@ -1340,12 +1850,10 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
         return;
       }
 
+      // Prevent browser page scroll during movement interaction
       if (
-        code === 'ArrowUp' ||
-        code === 'ArrowDown' ||
-        code === 'ArrowLeft' ||
-        code === 'ArrowRight' ||
-        code === 'Space'
+        MOVEMENT_KEYS.has(e.key) ||
+        codes.some((c) => MOVEMENT_CODES.has(c))
       ) {
         if (gameStateRef.current === 'playing' || debugModeRef.current !== 'off') {
           e.preventDefault();
@@ -1353,33 +1861,38 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
       }
 
       if (!e.repeat) {
-        if (code === 'Space' || code === 'KeyF') {
+        if (codes.includes('Space') || codes.includes('KeyF')) {
           justPressedBonus = true;
         }
-        if (code === 'KeyZ') {
+        if (codes.includes('KeyZ')) {
           justPressedWeapon = true;
         }
-        if (code === 'ShiftLeft' || code === 'ShiftRight') {
+        if (codes.includes('ShiftLeft') || codes.includes('ShiftRight')) {
           justPressedShift = true;
         }
         // Pressing P pauses/unpauses WITHOUT displaying the pause menu, preserving full camera & zoom control
-        if (code === 'KeyP' && !debugMenuOpenRef.current) {
+        if (codes.includes('KeyP') && !debugMenuOpenRef.current) {
           e.preventDefault();
           callbacksRef.current.onToggleCameraPause();
           return;
         }
-        if (code === 'Escape') {
+        if (primaryCode === 'Escape' || codes.includes('Escape')) {
           callbacksRef.current.onTogglePause();
           return;
         }
-        if (code === 'KeyC' && gameStateRef.current === 'playing') {
+        if (codes.includes('KeyC') && gameStateRef.current === 'playing') {
           callbacksRef.current.onCycleCamera();
         }
       }
     };
 
     const onKeyUp = (e: KeyboardEvent) => {
-      keysPressed.delete(e.code);
+      if (handledKeyUpEvents.has(e)) return;
+      handledKeyUpEvents.add(e);
+      const codes = extractCanonicalCodes(e);
+      for (let i = 0; i < codes.length; i++) {
+        keysPressed.delete(codes[i]);
+      }
     };
 
     const clearInputs = () => {
@@ -1390,8 +1903,12 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
       isDragging = false;
     };
 
-    window.addEventListener('keydown', onKeyDown);
-    window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('keydown', onKeyDown, { capture: true });
+    window.addEventListener('keyup', onKeyUp, { capture: true });
+    document.addEventListener('keydown', onKeyDown);
+    document.addEventListener('keyup', onKeyUp);
+    container.addEventListener('keydown', onKeyDown);
+    container.addEventListener('keyup', onKeyUp);
     window.addEventListener('blur', clearInputs);
 
     // Build / Rebuild Track & Racers
@@ -1501,7 +2018,7 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
 
       spline = createTrackSpline(cfg.trackId);
       pads = createTrackPads(cfg.trackId);
-      rings = createEnergyRings(cfg.trackId);
+      rings = [];
       currentTextures = createProceduralTextures(renderer, cfg.trackId, cfg.atmosphere);
       currentWorld = buildTrackAndWorld(
         spline,
@@ -1542,9 +2059,23 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
 
       raceElapsedMs = 0;
       const isDemo = demoModeRef.current;
+      const isCity = isCityTrack(settingsRef.current.trackId);
+      INTRO_TOTAL_SEC = isCity ? CITY_INTRO_TOTAL_SEC : 0.0;
+      LOCK_START_SEC = isCity ? CITY_LOCK_START_SEC : 0.0;
+      STABILIZED_VIEW_SEC = isCity ? CITY_STABILIZED_SEC : 0.0;
+      COUNTDOWN_START_SEC = isCity ? CITY_COUNTDOWN_START_SEC : 0.0;
+
       countdownTimer = isDemo ? 0 : INTRO_TOTAL_SEC;
       introAnnounced = isDemo;
       preCountdownLockPlayed = isDemo;
+      introDistantThunderPlayed = isDemo;
+      preCountdownThunderPlayed = isDemo;
+      preCountdownLightningPlayed = isDemo;
+      manualDriveSkipTimer = 0;
+      distantSheetFlash = 0;
+      lightningBoltFlash = 0;
+      nextStormEventTimer = 4.2;
+      pendingThunderDelay = -1;
       lastCountdownInt = isDemo ? 0 : 4;
       countdownFovKick = isDemo ? 6.0 : 0;
       justPressedBonus = false;
@@ -1585,7 +2116,7 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
           box.collectAnimProgress = 0;
           box.itemGroup.visible = true;
           box.holoBoxGroup.visible = true;
-          box.itemGroup.scale.setScalar(1);
+          box.itemGroup.scale.setScalar(box.weaponType ? 1.32 : 1.22);
           box.holoBoxGroup.scale.setScalar(1);
         }
       }
@@ -1601,6 +2132,39 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
       const playerIdx = racers.findIndex((r) => r.isPlayer);
       if (playerIdx >= 0) {
         const player = racers[playerIdx];
+        const camMode = settingsRef.current.cameraMode;
+        const initCamDist =
+          camMode === 'cockpit'
+            ? 0.6
+            : camMode === 'close'
+            ? -8.5
+            : camMode === 'chase'
+            ? -13.5
+            : -19.5;
+        const initCamHeight =
+          camMode === 'cockpit'
+            ? 1.15
+            : camMode === 'close'
+            ? 3.05
+            : camMode === 'chase'
+            ? 4.55
+            : 6.8;
+        const initLookDist =
+          camMode === 'cockpit'
+            ? 48.0
+            : camMode === 'close'
+            ? 14.0
+            : camMode === 'chase'
+            ? 4.0
+            : 6.5;
+        const initLookHeight =
+          camMode === 'cockpit'
+            ? 1.85
+            : camMode === 'close'
+            ? 1.45
+            : camMode === 'chase'
+            ? 0.95
+            : 0.65;
         sampleTrackFrame(spline, player.t, _pos, _fwd, _right, _up);
         smoothedCamFwd.copy(_fwd);
         smoothedCamRight.copy(_right);
@@ -1612,16 +2176,17 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
           .addScaledVector(_up, 0.72);
         currentCamPos
           .copy(_shipPos)
-          .addScaledVector(_fwd, -14.2)
-          .addScaledVector(_up, 4.85);
+          .addScaledVector(_fwd, initCamDist)
+          .addScaledVector(_up, initCamHeight);
         currentCamLook
           .copy(_shipPos)
-          .addScaledVector(_fwd, 2.0)
-          .addScaledVector(_up, 0.98);
+          .addScaledVector(_fwd, initLookDist)
+          .addScaledVector(_up, initLookHeight);
         camera.position.copy(currentCamPos);
         camera.lookAt(currentCamLook);
       }
       window.focus();
+      container.focus({ preventScroll: true });
     };
 
     // Emit Glowing Neon-Cyan Thruster Sparks & Thermal Heat Haze from Twin Rear Nozzles (Speed & Boost Reactive)
@@ -2039,7 +2604,6 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
         exploreDistance = 32;
       } else if (mode === 'vehicle_orbit') {
         countdownTimer = 0;
-        player.speedKmh = Math.max(player.speedKmh, 520);
         vehiclePanOffset.set(0, 0, 0);
         orbitDistance = 9.5;
         orbitPitch = 0.26;
@@ -2056,8 +2620,12 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
     let lastHudEmitTime = 0;
     let smoothedMotionLinesIntensity = 0;
     let motionLinesPreviewTimer = 0;
+    let boostComboPhase = 0;
     let prevEnableMotionLines = settingsRef.current.enableMotionLines;
     let smoothedGForceTilt = 0;
+    let smoothedDriftSwayLat = 0;
+    let smoothedDriftLookYaw = 0;
+    let smoothedDriftRoll = 0;
     const _aheadTangent = new THREE.Vector3();
 
     function afterDraw(cb: () => void) {
@@ -2107,14 +2675,63 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
 
       // Live-sync post-processing & particle visibility flags so toggling in Settings updates the screen immediately
       const isCity = isCityTrack(cfg.trackId);
+      const isStormActive = isCity && cfg.weatherMode !== 'clear';
       bloom.enabled = cfg.enableBloom;
       heatHazeScreenPass.enabled = cfg.enableHeatHaze && !isCity;
       heatHazeInstanced.visible = cfg.enableHeatHaze;
       motionLinesPass.enabled = cfg.enableMotionLines;
+      stormRainPass.enabled = isStormActive && cfg.enableRisingEmbers;
+      stormSkyGroup.visible = isStormActive;
       weatherInstanced.visible = cfg.enableRisingEmbers;
       debrisInstanced.visible = cfg.enableTrackDebris;
       thrusterSparkInstanced.visible = cfg.showParticles;
       sparkInstanced.visible = cfg.showParticles;
+
+      // Decay & flicker lightning/sheet flashes + update storm sky & lighting uniforms
+      if (!isCamPaused) {
+        if (distantSheetFlash > 0) {
+          distantSheetFlash = Math.max(0, distantSheetFlash - dt * 2.2);
+        }
+        if (lightningBoltFlash > 0) {
+          lightningBoltFlash = Math.max(0, lightningBoltFlash - dt * 2.55);
+        }
+      }
+      const multiFlicker =
+        lightningBoltFlash > 0.05
+          ? lightningBoltFlash * (0.76 + 0.24 * Math.sin(timeSec * 62.0))
+          : 0.0;
+      const cloudDensityVal = currentWeather.cloudDensity ?? (isStormActive ? 0.88 : 0.0);
+
+      stormCanopyMat.uniforms.uTime.value = timeSec;
+      stormCanopyMat.uniforms.uCloudDensity.value = cloudDensityVal;
+      stormCanopyMat.uniforms.uDistantFlash.value = distantSheetFlash;
+      stormCanopyMat.uniforms.uBoltFlash.value = multiFlicker;
+
+      stormVortexMat.uniforms.uTime.value = timeSec;
+      stormVortexMat.uniforms.uCloudDensity.value = cloudDensityVal;
+      stormVortexMat.uniforms.uDistantFlash.value = distantSheetFlash;
+      stormVortexMat.uniforms.uBoltFlash.value = multiFlicker;
+      stormVortexMat.uniforms.uBoltSeed.value = lightningBoltSeed;
+      stormVortexMat.uniforms.uBoltXOffset.value = lightningBoltXOffset;
+
+      stormRainPass.uniforms.uTime.value = timeSec;
+      stormRainPass.uniforms.uRainIntensity.value = isStormActive
+        ? currentWeather.intensity
+        : 0.0;
+      stormRainPass.uniforms.uLightningFlash.value = multiFlicker;
+      stormRainPass.uniforms.uDistantFlash.value = distantSheetFlash;
+
+      if (isStormActive) {
+        const isNeon = cfg.atmosphere === 'neon';
+        const baseHemi = isNeon ? 0.66 : 0.95;
+        const baseKey = isNeon ? 0.92 : 1.25;
+        const flashSurge = multiFlicker * 1.65 + distantSheetFlash * 0.55;
+        hemiLight.intensity = baseHemi + flashSurge * 0.65;
+        keyLight.intensity = baseKey + flashSurge * 0.95;
+        stormLightningLight.intensity = multiFlicker * 18.0 + distantSheetFlash * 4.2;
+      } else {
+        stormLightningLight.intensity = 0;
+      }
 
       if (!prevEnableMotionLines && cfg.enableMotionLines) {
         motionLinesPreviewTimer = 2.8;
@@ -2140,10 +2757,24 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
             sl.rotation.x = Math.cos(timeSec * 0.42 + i * 0.8) * 0.18;
           }
         }
+        if (!isCamPaused && currentTextures) {
+          currentTextures.updateAnimatedTextures(timeSec);
+        }
+        const activePlayer = racers.find((r) => r.isPlayer);
+        const comboLevel = activePlayer?.boostComboCount ?? 0;
+        if (!isCamPaused) {
+          boostComboPhase += dt * (2.6 + comboLevel * 1.65);
+        }
         for (let i = 0; i < currentWorld.animatedShaders.length; i++) {
           const sh = currentWorld.animatedShaders[i];
           if (!isCamPaused) {
             sh.uniforms.uTime.value = timeSec;
+          }
+          if (sh.uniforms.uComboPhase !== undefined) {
+            sh.uniforms.uComboPhase.value = boostComboPhase;
+          }
+          if (sh.uniforms.uComboLevel !== undefined) {
+            sh.uniforms.uComboLevel.value = comboLevel;
           }
           if (sh.uniforms.uEnableDisplacement !== undefined) {
             sh.uniforms.uEnableDisplacement.value = cfg.enableLavaDisplacement ? 1.0 : 0.0;
@@ -2163,13 +2794,15 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
         disabledPadIds.clear();
         for (let i = 0; i < currentWorld.powerUpBoxes.length; i++) {
           const box = currentWorld.powerUpBoxes[i];
-          const bobOffset = Math.sin(timeSec * 3.2 + i * 0.85) * 0.14;
-          box.itemGroup.position.y = 1.28 + bobOffset;
-          box.holoBoxGroup.position.y = 1.28 + bobOffset * 0.5;
-          box.itemGroup.rotation.y += worldAnimDt * 2.35;
-          box.holoBoxGroup.rotation.y -= worldAnimDt * 0.88;
-          box.holoBoxGroup.rotation.x = Math.sin(timeSec * 1.6 + i) * 0.12;
-          box.holoBoxGroup.rotation.z = Math.cos(timeSec * 1.4 + i) * 0.12;
+          const baseItemScale = box.weaponType ? 1.55 : 1.45;
+          const bobOffset = Math.sin(timeSec * 3.2 + i * 0.85) * 0.22;
+          box.itemGroup.position.y = 2.15 + bobOffset;
+          box.holoBoxGroup.position.y = 2.15 + bobOffset;
+          box.itemGroup.rotation.y += worldAnimDt * 2.65;
+          box.itemGroup.rotation.x = Math.sin(timeSec * 1.8 + i * 0.7) * 0.22;
+          box.holoBoxGroup.rotation.y -= worldAnimDt * 1.85;
+          box.holoBoxGroup.rotation.x += worldAnimDt * 0.65;
+          box.holoBoxGroup.rotation.z = Math.cos(timeSec * 1.65 + i) * 0.28;
 
           if (box.respawnTimer > 0) {
             box.respawnTimer = Math.max(0, box.respawnTimer - worldAnimDt);
@@ -2184,13 +2817,13 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
               } else {
                 box.itemGroup.visible = true;
                 box.holoBoxGroup.visible = true;
-                box.itemGroup.scale.setScalar(appearFrac);
+                box.itemGroup.scale.setScalar(appearFrac * baseItemScale);
                 box.holoBoxGroup.scale.setScalar(appearFrac);
               }
             } else {
               box.itemGroup.visible = true;
               box.holoBoxGroup.visible = true;
-              box.itemGroup.scale.setScalar(1);
+              box.itemGroup.scale.setScalar(baseItemScale);
               box.holoBoxGroup.scale.setScalar(1);
             }
           }
@@ -2304,9 +2937,9 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
             r.t = 0.012 + (((r.t - 0.012 + dT) % 0.28) + 0.28) % 0.28;
           } else {
             r.t = 0.002;
-            r.lateralOffset = 2.6;
+            r.lateralOffset = 0;
             r.speedKmh = 0;
-            r.isBoosting = true;
+            r.isBoosting = false;
           }
         }
         updateAllShipTransforms(dt, true);
@@ -2352,7 +2985,25 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
             justPressedBonus ||
             externalTrigger.useBonus;
           const throttleInput =
-            keysPressed.has('ArrowUp') || keysPressed.has('KeyW');
+            keysPressed.has('ArrowUp') ||
+            keysPressed.has('KeyW') ||
+            Boolean(externalTrigger.throttleHeld);
+          const manualSteerOrDriveInput =
+            throttleInput ||
+            keysPressed.has('ArrowDown') ||
+            keysPressed.has('KeyS') ||
+            keysPressed.has('ArrowLeft') ||
+            keysPressed.has('KeyA') ||
+            keysPressed.has('ArrowRight') ||
+            keysPressed.has('KeyD') ||
+            externalTrigger.steerDir !== 0 ||
+            pointerSteerDir !== 0;
+
+          if (countdownTimer > 0 && manualSteerOrDriveInput) {
+            manualDriveSkipTimer += dt;
+          } else {
+            manualDriveSkipTimer = 0;
+          }
 
           // Trigger Electronic Voice Circuit Introduction at the start of the extended panoramic overview
           if (!introAnnounced && countdownTimer > COUNTDOWN_START_SEC) {
@@ -2360,13 +3011,16 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
             audioEngine.announceCircuitIntro(cfg.trackId);
           }
 
-          // Allow skipping countdown with Shift/Space, or launching when holding Throttle (W / ArrowUp) during the final 1.2s
+          // Allow skipping countdown with Shift/Space, or when holding manual steering/throttle input (>0.20s)
           if (
             countdownTimer > 0 &&
-            (boostOrSkipInput || (throttleInput && countdownTimer <= 1.2))
+            (boostOrSkipInput ||
+              manualDriveSkipTimer > 0.20 ||
+              (throttleInput && countdownTimer <= 1.2))
           ) {
             const timedThrottleLaunch = throttleInput && countdownTimer <= 1.2;
             countdownTimer = 0;
+            manualDriveSkipTimer = 0;
             justPressedBonus = false;
             justPressedShift = false;
             externalTrigger.boostPulse = false;
@@ -2392,13 +3046,40 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
             if (countdownTimer > LOCK_START_SEC) {
               currentIntroPhase = 'overview';
               statusBanner = `${trackSpec.name} // ${currentWeather.label}`;
+              // During lengthened City panoramic sweep, trigger distant cloud sheet lightning + rolling thunder
+              if (isStormActive && !introDistantThunderPlayed && countdownTimer <= 6.8) {
+                introDistantThunderPlayed = true;
+                distantSheetFlash = 0.88;
+                audioEngine.playDistantThunder(0.82);
+              }
             } else if (countdownTimer > COUNTDOWN_START_SEC) {
               currentIntroPhase = 'lock';
               if (!preCountdownLockPlayed) {
                 preCountdownLockPlayed = true;
                 audioEngine.playPreCountdownLock();
               }
-              statusBanner = 'GRID LOCK // AWAITING LAUNCH SIGNAL';
+              if (isStormActive) {
+                // Once camera stabilizes in game view (countdownTimer <= STABILIZED_VIEW_SEC = 4.05s):
+                // 1) Deep thunder rumble first (~4.02s)
+                if (!preCountdownThunderPlayed && countdownTimer <= STABILIZED_VIEW_SEC) {
+                  preCountdownThunderPlayed = true;
+                  distantSheetFlash = 1.0;
+                  audioEngine.playDistantThunder(1.0);
+                }
+                // 2) Immediately after (~3.55s), purple lightning bolt tears through the sky before 3-2-1-GO!
+                if (!preCountdownLightningPlayed && countdownTimer <= 3.55) {
+                  preCountdownLightningPlayed = true;
+                  triggerPurpleLightningBolt(1.32, 0.0);
+                  countdownFovKick = 5.0;
+                }
+                statusBanner = preCountdownLightningPlayed
+                  ? 'PURPLE LIGHTNING STRIKE // IGNITION ARMED!'
+                  : preCountdownThunderPlayed
+                  ? 'SUPERCELL OVERHEAD // THUNDER RUMBLE'
+                  : 'GRID LOCK // STABILIZING IN STORM VORTEX';
+              } else {
+                statusBanner = 'GRID LOCK // AWAITING LAUNCH SIGNAL';
+              }
             } else {
               currentIntroPhase = 'countdown';
               const scaledCount = (countdownTimer / COUNTDOWN_START_SEC) * 3.0;
@@ -2443,6 +3124,39 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
             currentIntroPhase = 'racing';
             raceElapsedMs += dt * 1000;
 
+            // Dynamic Evolving Storm Choreography during active racing on the City circuit:
+            // First distant cloud lightning -> delayed rolling thunder FX -> then visible purple lightning bolt + thunderclap
+            if (isStormActive) {
+              if (pendingThunderDelay > 0) {
+                pendingThunderDelay -= dt;
+                if (pendingThunderDelay <= 0) {
+                  pendingThunderDelay = -1;
+                  audioEngine.playDistantThunder(0.75 + currentWeather.intensity * 0.35);
+                }
+              }
+              nextStormEventTimer -= dt;
+              if (nextStormEventTimer <= 0) {
+                const phase = currentWeather.stormPhase ?? 'monsoon_squall';
+                if (
+                  phase === 'distant_lightning' ||
+                  (phase === 'gathering_clouds' && Math.random() < 0.7)
+                ) {
+                  // Distant sheet lightning in the storm clouds first, followed by delayed thunder
+                  distantSheetFlash = Math.max(distantSheetFlash, 0.85);
+                  pendingThunderDelay = 0.65 + Math.random() * 0.55;
+                  nextStormEventTimer = 4.2 + Math.random() * 3.0;
+                } else {
+                  // Distant warning flash first or direct forked purple lightning strike tearing through the sky
+                  const panX = (Math.random() - 0.5) * 0.28;
+                  triggerPurpleLightningBolt(
+                    0.95 + currentWeather.intensity * 0.32,
+                    panX
+                  );
+                  nextStormEventTimer = 5.6 + Math.random() * 4.2;
+                }
+              }
+            }
+
             if (statusBannerTimer > 0) {
               statusBannerTimer = Math.max(0, statusBannerTimer - dt);
               if (statusBannerTimer === 0) {
@@ -2464,6 +3178,23 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
             const useWeaponNow = justPressedWeapon || externalTrigger.useWeapon;
             justPressedWeapon = false;
             externalTrigger.useWeapon = false;
+            const hasManualDriveInput =
+              keysPressed.has('ArrowUp') ||
+              keysPressed.has('ArrowDown') ||
+              keysPressed.has('ArrowLeft') ||
+              keysPressed.has('ArrowRight') ||
+              keysPressed.has('KeyW') ||
+              keysPressed.has('KeyA') ||
+              keysPressed.has('KeyS') ||
+              keysPressed.has('KeyD') ||
+              externalTrigger.steerDir !== 0 ||
+              Boolean(externalTrigger.throttleHeld) ||
+              Boolean(externalTrigger.brakeHeld);
+
+            if (demoModeRef.current && hasManualDriveInput) {
+              demoModeRef.current = false;
+              callbacksRef.current.onTakeControl?.();
+            }
             const isDemo = demoModeRef.current;
 
             const playerInput =
@@ -2478,55 +3209,48 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
                       racers,
                       disabledPadIds
                     );
-                    if (isDemo) {
-                      if (keysPressed.has('KeyA') || keysPressed.has('ArrowLeft') || externalTrigger.steerDir < 0) {
-                        auto.steerLeft = true;
-                        auto.steerRight = false;
-                      } else if (keysPressed.has('KeyD') || keysPressed.has('ArrowRight') || externalTrigger.steerDir > 0) {
-                        auto.steerRight = true;
-                        auto.steerLeft = false;
-                      }
-                      if (
+                    return auto;
+                  })()
+                : (() => {
+                    const isBraking =
+                      keysPressed.has('ArrowDown') ||
+                      keysPressed.has('KeyS') ||
+                      Boolean(externalTrigger.brakeHeld);
+                    const isSteerLeft =
+                      keysPressed.has('ArrowLeft') ||
+                      keysPressed.has('KeyA') ||
+                      externalTrigger.steerDir < 0 ||
+                      pointerSteerDir < 0;
+                    const isSteerRight =
+                      keysPressed.has('ArrowRight') ||
+                      keysPressed.has('KeyD') ||
+                      externalTrigger.steerDir > 0 ||
+                      pointerSteerDir > 0;
+                    const isAirbrakeLeft = keysPressed.has('KeyQ');
+                    const isAirbrakeRight = keysPressed.has('KeyE');
+                    const hasActiveSteerInput =
+                      isSteerLeft || isSteerRight || isAirbrakeLeft || isAirbrakeRight;
+                    return {
+                      throttle:
+                        keysPressed.has('ArrowUp') ||
+                        keysPressed.has('KeyW') ||
+                        Boolean(externalTrigger.throttleHeld) ||
+                        externalTrigger.boostPulse ||
+                        (!isBraking && hasActiveSteerInput),
+                      brake: isBraking,
+                      steerLeft: isSteerLeft,
+                      steerRight: isSteerRight,
+                      airbrakeLeft: isAirbrakeLeft,
+                      airbrakeRight: isAirbrakeRight,
+                      boostHeld:
                         shiftTappedNow ||
                         keysPressed.has('ShiftLeft') ||
                         keysPressed.has('ShiftRight') ||
-                        externalTrigger.boostPulse
-                      ) {
-                        auto.boostHeld = true;
-                      }
-                      if (useBonusNow) {
-                        auto.useBonusPressed = true;
-                      }
-                      if (useWeaponNow) {
-                        auto.useWeaponPressed = true;
-                      }
-                    }
-                    return auto;
-                  })()
-                : {
-                    throttle:
-                      keysPressed.has('ArrowUp') ||
-                      keysPressed.has('KeyW') ||
-                      externalTrigger.boostPulse,
-                    brake: keysPressed.has('ArrowDown') || keysPressed.has('KeyS'),
-                    steerLeft:
-                      keysPressed.has('ArrowLeft') ||
-                      keysPressed.has('KeyA') ||
-                      externalTrigger.steerDir < 0,
-                    steerRight:
-                      keysPressed.has('ArrowRight') ||
-                      keysPressed.has('KeyD') ||
-                      externalTrigger.steerDir > 0,
-                    airbrakeLeft: keysPressed.has('KeyQ'),
-                    airbrakeRight: keysPressed.has('KeyE'),
-                    boostHeld:
-                      shiftTappedNow ||
-                      keysPressed.has('ShiftLeft') ||
-                      keysPressed.has('ShiftRight') ||
-                      externalTrigger.boostPulse,
-                    useBonusPressed: useBonusNow,
-                    useWeaponPressed: useWeaponNow,
-                  };
+                        externalTrigger.boostPulse,
+                      useBonusPressed: useBonusNow,
+                      useWeaponPressed: useWeaponNow,
+                    };
+                  })();
 
             const prevPlayerT = player.t;
             const prevBoosting = wasPlayerBoosting;
@@ -2604,7 +3328,7 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
               const wMeta = WEAPON_META[pRes.collectedWeapon];
               statusBanner = `ARMED: ${wMeta.label} // PRESS [Z] TO FIRE`;
               statusBannerTimer = 1.8;
-              audioEngine.playBonusActivate();
+              audioEngine.playBonusPickup('weapon');
             }
 
             // Handle Player Firing Held Weapon [Z]
@@ -2634,35 +3358,27 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
               statusBanner = `${pMeta.label} // ${pMeta.effectBadge}`;
               statusBannerTimer = 1.5;
 
-              if (pRes.collectedPowerUp === 'boost') {
-                boostPadsHitCount++;
-                cameraShakeTrauma = Math.min(1, cameraShakeTrauma + 0.45);
-                audioEngine.playBoostPad();
-              } else if (pRes.collectedPowerUp === 'nitro') {
-                audioEngine.playBoostPad();
-              } else if (pRes.collectedPowerUp === 'crystal') {
-                audioEngine.playRingPass(Math.min(5, player.crystalUpgradeLevel + 1), true);
-              } else if (pRes.collectedPowerUp === 'shield') {
-                audioEngine.playBonusActivate();
-              } else if (pRes.collectedPowerUp === 'repair') {
-                audioEngine.playBoostPad();
-              } else if (pRes.collectedPowerUp === 'credit') {
+              if (pRes.collectedPowerUp === 'credit') {
                 callbacksRef.current.onEarnCredits(150);
-                audioEngine.playRingPass(3, false);
               }
-            } else if (!pRes.collectedWeapon) {
-              if (pRes.hitBoostPad) {
-                boostPadsHitCount++;
-                statusBanner = 'BOOST RING // +235 KM/H BURST';
-                statusBannerTimer = 1.2;
-                cameraShakeTrauma = Math.min(1, cameraShakeTrauma + 0.48);
-                audioEngine.playBoostPad();
-              }
-              if (pRes.hitRechargePad) {
-                statusBanner = 'REPAIR POWER-UP // HULL +40%';
-                statusBannerTimer = 1.1;
-                audioEngine.playBoostPad();
-              }
+              audioEngine.playBonusPickup(pRes.collectedPowerUp);
+            }
+
+            if (pRes.hitBoostPad) {
+              boostPadsHitCount++;
+              const combo = pRes.boostComboCount ?? player.boostComboCount ?? 1;
+              const comboVelocityBonus = 235 + (combo - 1) * 45;
+              statusBanner =
+                combo > 1
+                  ? `BOOST CHAIN x${combo} // +${comboVelocityBonus} KM/H COMBO SURGE!`
+                  : `BOOST CHAIN x1 // +${comboVelocityBonus} KM/H VELOCITY SURGE`;
+              statusBannerTimer = 1.65;
+              cameraShakeTrauma = Math.min(1, cameraShakeTrauma + 0.38 + Math.min(0.3, combo * 0.06));
+              audioEngine.playBoostPad(combo);
+            } else if (!pRes.collectedWeapon && !pRes.collectedPowerUp && pRes.hitRechargePad) {
+              statusBanner = 'REPAIR POWER-UP // HULL +40%';
+              statusBannerTimer = 1.1;
+              audioEngine.playBonusPickup('repair');
             }
 
             if (pRes.passedRing) {
@@ -2726,9 +3442,14 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
             }
 
             // Step AI Racers with Dynamic Weather & Rival Awareness
-            const stepResults: StepRacerResult[] = [pRes];
-            for (let i = 1; i < racers.length; i++) {
+            // CRITICAL: Skip `r.isPlayer` (`racers[3]`) so the player is NEVER stepped a second time by AI!
+            const stepResults: StepRacerResult[] = new Array(racers.length);
+            for (let i = 0; i < racers.length; i++) {
               const r = racers[i];
+              if (r.isPlayer) {
+                stepResults[i] = pRes;
+                continue;
+              }
               // Respawn destroyed AI craft after 3.2s so the circuit stays lively
               if (r.isDestroyed && r.destroyedTimer >= 3.2) {
                 r.isDestroyed = false;
@@ -2761,7 +3482,7 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
                 undefined,
                 disabledPadIds
               );
-              stepResults.push(aiRes);
+              stepResults[i] = aiRes;
 
               // When an opponent in front of us takes a bonus/weapon square, it disappears and respawns after 10.0 seconds!
               if (aiRes.collectedPadId !== null && currentWorld) {
@@ -3066,16 +3787,19 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
           const sideOffset = Math.sin(orbitYaw) * cosP * orbitDistance;
           const upOffset = Math.max(0.35, sinP * orbitDistance + 1.05);
 
+          smoothedCamLateral += (player.lateralOffset - smoothedCamLateral) * (1 - Math.exp(-14 * dt));
+          const orbitAnchorLat = isCamPaused ? player.lateralOffset : smoothedCamLateral * 0.25;
           _desiredCamLook
-            .copy(_shipPos)
-            .add(vehiclePanOffset)
-            .addScaledVector(_up, 0.9);
+            .copy(_pos)
+            .addScaledVector(_right, orbitAnchorLat)
+            .addScaledVector(_up, 0.72 + 0.9)
+            .add(vehiclePanOffset);
           _desiredCamPos
-            .copy(_shipPos)
-            .add(vehiclePanOffset)
+            .copy(_pos)
+            .addScaledVector(_right, orbitAnchorLat + sideOffset)
             .addScaledVector(_fwd, backOffset)
-            .addScaledVector(_right, sideOffset)
-            .addScaledVector(_up, upOffset);
+            .addScaledVector(_up, 0.72 + upOffset)
+            .add(vehiclePanOffset);
 
           const camLerp = 1 - Math.exp(-18 * dt);
           currentCamPos.lerp(_desiredCamPos, camLerp);
@@ -3088,34 +3812,110 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
             camera.updateProjectionMatrix();
           }
         } else {
-          // Default Player View ('chase') matches the elevated, wide third-person framing from the reference screenshot:
-          // camera sits ~14.2m behind and ~4.85m above the craft, looking slightly ahead (+2.0m, +0.98m) so the entire ship
-          // is framed cleanly in the center-middle of the screen well above the bottom HUD bar, with all 4 lanes clearly visible.
+          // Selectable Camera Rig Modes:
+          // - 'perspective' (Default): High-perspective distant vantage point (~19.5m behind, ~6.8m above, looking down at +6.5m/+0.65m)
+          //   matching the reference screenshot so the craft sits compactly in the center of the roadway with full 4-lane perspective depth.
+          // - 'chase': Medium chase camera (~13.5m behind, ~4.55m above)
+          // - 'close': Low close-up thruster view (~8.5m behind, ~3.05m above)
+          // - 'cockpit': First-person nose view (+0.6m ahead, +1.15m above)
           const camDist =
-            cfg.cameraMode === 'cockpit' ? 0.6 : cfg.cameraMode === 'close' ? -8.5 : -14.2;
+            cfg.cameraMode === 'cockpit'
+              ? 0.6
+              : cfg.cameraMode === 'close'
+              ? -8.5
+              : cfg.cameraMode === 'chase'
+              ? -13.5
+              : -19.5;
           const camHeight =
-            cfg.cameraMode === 'cockpit' ? 1.15 : cfg.cameraMode === 'close' ? 3.05 : 4.85;
+            cfg.cameraMode === 'cockpit'
+              ? 1.15
+              : cfg.cameraMode === 'close'
+              ? 3.05
+              : cfg.cameraMode === 'chase'
+              ? 4.55
+              : 6.8;
           const lookDist =
-            cfg.cameraMode === 'cockpit' ? 48.0 : cfg.cameraMode === 'close' ? 14.0 : 2.0;
+            cfg.cameraMode === 'cockpit'
+              ? 48.0
+              : cfg.cameraMode === 'close'
+              ? 14.0
+              : cfg.cameraMode === 'chase'
+              ? 4.0
+              : 6.5;
           const lookHeight =
-            cfg.cameraMode === 'cockpit' ? 1.85 : cfg.cameraMode === 'close' ? 1.45 : 0.98;
+            cfg.cameraMode === 'cockpit'
+              ? 1.85
+              : cfg.cameraMode === 'close'
+              ? 1.45
+              : cfg.cameraMode === 'chase'
+              ? 0.95
+              : 0.65;
 
-          // Smoothly damp the track orientation basis and lateral offset so the chase camera
-          // tracks the craft longitudinally while allowing the ship to visibly move across the roadway width on screen
+          const playerSpec = SHIP_SPECS[player.shipId];
+          const speedRatioFov = THREE.MathUtils.clamp(
+            player.speedKmh / Math.max(1, playerSpec.maxSpeedKmh),
+            0,
+            1.45
+          );
+
+          // Subtle Camera Sway Following Vehicle's Drift Angle During High-Speed Maneuvers:
+          // Follows player.yawOffset (drift angle) and lateral slip velocity scaled by high-speed factor
+          const driftAngle =
+            player.yawOffset -
+            THREE.MathUtils.clamp(player.lateralVelocity * 0.0065, -0.22, 0.22);
+          const highSpeedFactor =
+            THREE.MathUtils.smoothstep(speedRatioFov, 0.15, 0.92) *
+            (player.isBoosting ? 1.15 : 1.0);
+          const targetDriftSwayLat = THREE.MathUtils.clamp(
+            -Math.sin(driftAngle) * 0.45 * highSpeedFactor,
+            -0.42,
+            0.42
+          );
+          const targetDriftLookYaw = THREE.MathUtils.clamp(
+            Math.sin(driftAngle) * 0.35 * highSpeedFactor,
+            -0.32,
+            0.32
+          );
+          const targetDriftRoll = THREE.MathUtils.clamp(
+            -driftAngle * 0.075 * highSpeedFactor,
+            -0.045,
+            0.045
+          );
+
+          const swayLerp = 1 - Math.exp(-9.5 * dt);
+          smoothedDriftSwayLat += (targetDriftSwayLat - smoothedDriftSwayLat) * swayLerp;
+          smoothedDriftLookYaw += (targetDriftLookYaw - smoothedDriftLookYaw) * swayLerp;
+          smoothedDriftRoll += (targetDriftRoll - smoothedDriftRoll) * swayLerp;
+
+          // Keep the camera softly following the ship's lateral position (0.14..0.22 lateral follow)
+          // so the entire roadway (guardrail to guardrail) stays framed steadily while the player's
+          // ship visually glides and drifts smoothly from the left guardrail to the right guardrail!
           const basisLerp = 1 - Math.exp(-16 * dt);
           smoothedCamFwd.lerp(_fwd, basisLerp).normalize();
           smoothedCamRight.lerp(_right, basisLerp).normalize();
           smoothedCamUp.lerp(_up, basisLerp).normalize();
-          smoothedCamLateral += (player.lateralOffset - smoothedCamLateral) * (1 - Math.exp(-14 * dt));
+          smoothedCamLateral += (player.lateralOffset - smoothedCamLateral) * (1 - Math.exp(-15 * dt));
 
           const isCockpitCam = cfg.cameraMode === 'cockpit';
-          const camPosLateral = isCockpitCam ? smoothedCamLateral : smoothedCamLateral * 0.72;
+          const lateralFollowFactor = cfg.cameraMode === 'perspective' ? 0.14 : 0.22;
+          const camPosLateral = isCockpitCam
+            ? smoothedCamLateral
+            : THREE.MathUtils.clamp(
+                smoothedCamLateral * lateralFollowFactor + smoothedDriftSwayLat,
+                -9.5,
+                9.5
+              );
           const camLookLateral = isCockpitCam
             ? smoothedCamLateral - Math.sin(player.yawOffset) * 10.0
-            : smoothedCamLateral * 0.82 - Math.sin(player.yawOffset) * 1.8;
+            : THREE.MathUtils.clamp(
+                smoothedCamLateral * (lateralFollowFactor + 0.08) - smoothedDriftLookYaw,
+                -10.5,
+                10.5
+              );
 
           document.body.dataset.playerLateral = player.lateralOffset.toFixed(2);
           document.body.dataset.playerSpeed = player.speedKmh.toFixed(1);
+          document.body.dataset.camDriftSway = smoothedDriftSwayLat.toFixed(4);
 
           _chasePos
             .copy(_pos)
@@ -3130,33 +3930,34 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
             .addScaledVector(smoothedCamFwd, lookDist);
 
           if (countdownTimer > LOCK_START_SEC) {
-            // Phase 1 (10.2s -> 5.4s): Grand Panoramic Aerial Sweep across the circuit & starting grid
+            // Phase 1: Lengthened Panoramic Aerial Sweep across the circuit & storm skyline
             const panT = THREE.MathUtils.clamp(
               (INTRO_TOTAL_SEC - countdownTimer) / (INTRO_TOTAL_SEC - LOCK_START_SEC),
               0,
               1
             );
             const smoothPan = panT * panT * (3 - 2 * panT);
-            const orbitAngle = (1 - smoothPan) * 1.15 - 0.25;
+            const orbitAngle = (1 - smoothPan) * 1.28 - 0.25;
 
             _overviewPos
               .copy(_shipPos)
-              .addScaledVector(_fwd, 68 * (1 - smoothPan * 0.45))
-              .addScaledVector(_right, Math.sin(orbitAngle) * -42)
-              .addScaledVector(_up, 52 - smoothPan * 16);
+              .addScaledVector(_fwd, 72 * (1 - smoothPan * 0.48))
+              .addScaledVector(_right, Math.sin(orbitAngle) * -46)
+              .addScaledVector(_up, 56 - smoothPan * 18);
 
             _overviewLook
               .copy(_shipPos)
-              .addScaledVector(_fwd, 85 - smoothPan * 25)
+              .addScaledVector(_fwd, 95 - smoothPan * 32)
               .addScaledVector(_right, Math.cos(orbitAngle) * 18)
-              .addScaledVector(_up, 14 - smoothPan * 4);
+              .addScaledVector(_up, 18 - smoothPan * 6);
 
             currentCamPos.copy(_overviewPos);
             currentCamLook.copy(_overviewLook);
-          } else if (countdownTimer > COUNTDOWN_START_SEC) {
-            // Phase 2 (5.4s -> 3.4s): 2-Second Post-Voice Swoop from Panoramic Vista into Chase Lock
+          } else if (countdownTimer > STABILIZED_VIEW_SEC) {
+            // Phase 2a: Swoop from Panoramic Vista into Stabilized Game View
+            const swoopSpan = Math.max(0.1, LOCK_START_SEC - STABILIZED_VIEW_SEC);
             const lockT = THREE.MathUtils.clamp(
-              (LOCK_START_SEC - countdownTimer) / (LOCK_START_SEC - COUNTDOWN_START_SEC),
+              (LOCK_START_SEC - countdownTimer) / swoopSpan,
               0,
               1
             );
@@ -3166,18 +3967,19 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
             _overviewPos
               .copy(_shipPos)
               .addScaledVector(_fwd, 37.4 * (1 - ease) + camDist * ease)
-              .addScaledVector(_right, Math.sin(startAngle) * -42 * (1 - ease))
-              .addScaledVector(_up, 36 * (1 - ease) + camHeight * ease);
+              .addScaledVector(_right, Math.sin(startAngle) * -46 * (1 - ease) + camPosLateral * ease)
+              .addScaledVector(_up, 38 * (1 - ease) + (0.72 + camHeight) * ease);
 
             _overviewLook
               .copy(_shipPos)
-              .addScaledVector(_fwd, 60 * (1 - ease) + lookDist * ease)
-              .addScaledVector(_right, Math.cos(startAngle) * 18 * (1 - ease))
-              .addScaledVector(_up, 10 * (1 - ease) + 2.1 * ease);
+              .addScaledVector(_fwd, 63 * (1 - ease) + lookDist * ease)
+              .addScaledVector(_right, Math.cos(startAngle) * 18 * (1 - ease) + camLookLateral * ease)
+              .addScaledVector(_up, 12 * (1 - ease) + (0.72 + lookHeight) * ease);
 
             currentCamPos.copy(_overviewPos);
             currentCamLook.copy(_overviewLook);
           } else {
+            // Phase 2b (Stabilized in Game View for Thunder + Purple Lightning Bolt) & Phase 3 (3-2-1-GO! & Racing)
             currentCamPos.copy(_chasePos);
             currentCamLook.copy(_chaseLook);
           }
@@ -3191,12 +3993,6 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
           countdownFovKick *= Math.exp(-5.0 * dt);
 
           // Dynamic Velocity-Scaled Field of View (FOV): widens smoothly as craft speed & boost increase
-          const playerSpec = SHIP_SPECS[player.shipId];
-          const speedRatioFov = THREE.MathUtils.clamp(
-            player.speedKmh / Math.max(1, playerSpec.maxSpeedKmh),
-            0,
-            1.45
-          );
           const velocityFovDelta =
             Math.pow(speedRatioFov, 1.35) * 13.5 +
             (player.isBoosting ? 4.5 : 0) +
@@ -3212,13 +4008,10 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
             camera.updateProjectionMatrix();
           }
 
-          // Subtle G-Force Screen-Tilting Effect During High-Speed Cornering:
-          // Leans the camera in the direction of the turn, synchronized with craft rollAngle,
-          // lateralVelocity, track spline curvature, and velocity to enhance inertia & speed sensation
+          // Optional Post-FX Camera G-Force Tilt (OFF by default) + Subtle Drift-Angle Sway Roll
           if (cfg.enableGForceTilt && countdownTimer <= COUNTDOWN_START_SEC) {
             const lookAheadT = (((player.t + 0.012) % 1) + 1) % 1;
             spline.getTangentAt(lookAheadT, _aheadTangent);
-            // Cross product Y component in XZ plane: positive when track curves right, negative when left
             const trackTurnRate = _fwd.x * _aheadTangent.z - _fwd.z * _aheadTangent.x;
             const gForceSpeedFactor = Math.pow(
               THREE.MathUtils.clamp(speedRatioFov, 0.15, 1.35),
@@ -3236,10 +4029,11 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
             smoothedGForceTilt += (0 - smoothedGForceTilt) * (1 - Math.exp(-10.0 * dt));
           }
 
-          if (Math.abs(smoothedGForceTilt) > 0.0002) {
-            camera.rotateZ(smoothedGForceTilt);
+          const totalCamRoll = smoothedDriftRoll + smoothedGForceTilt;
+          if (Math.abs(totalCamRoll) > 0.0001) {
+            camera.rotateZ(totalCamRoll);
           }
-          document.body.dataset.camTilt = smoothedGForceTilt.toFixed(4);
+          document.body.dataset.camTilt = totalCamRoll.toFixed(4);
         }
       }
 
@@ -3251,6 +4045,38 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
       document.body.dataset.camFov = camera.fov.toFixed(2);
       document.body.dataset.playerT = player.t.toFixed(4);
 
+      // Anchor overhead 3D Storm Cloud Canopy & Forward Swirling Purple Supercell Vortex + Lightning Bolt
+      if (isStormActive) {
+        stormCanopyMesh.position.set(
+          camera.position.x,
+          camera.position.y + 185,
+          camera.position.z
+        );
+        // Position the swirling purple vortex & lightning bolt high ahead of the player along the camera/track view
+        camera.getWorldDirection(_camFwdXZ);
+        _camFwdXZ.y = 0;
+        if (_camFwdXZ.lengthSq() < 0.001) {
+          _camFwdXZ.set(0, 0, -1);
+        } else {
+          _camFwdXZ.normalize();
+        }
+        stormVortexMesh.position.set(
+          camera.position.x + _camFwdXZ.x * 410,
+          camera.position.y + 118,
+          camera.position.z + _camFwdXZ.z * 410
+        );
+        stormVortexMesh.lookAt(
+          camera.position.x,
+          camera.position.y + 52,
+          camera.position.z
+        );
+        stormLightningLight.position.set(
+          camera.position.x + _camFwdXZ.x * 160,
+          camera.position.y + 95,
+          camera.position.z + _camFwdXZ.z * 160
+        );
+      }
+
       // Update 3D Dynamic Weather / Rising Lava Ember Particle Pool (World-Space Modulo Wrapping — zero camera-turn flicker)
       const activeWeatherCount = cfg.enableRisingEmbers
         ? Math.floor(WEATHER_POOL_SIZE * currentWeather.intensity)
@@ -3260,6 +4086,8 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
       const halfXZ = 44;
       const spanY = 36;
       const halfY = 18;
+      const windGustX = isCityRain ? -6.2 + Math.sin(timeSec * 1.45) * 2.4 : 0;
+      const windGustZ = isCityRain ? -3.4 + Math.cos(timeSec * 1.15) * 1.8 : 0;
 
       for (let i = 0; i < WEATHER_POOL_SIZE; i++) {
         if (i >= activeWeatherCount) {
@@ -3271,9 +4099,11 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
         }
         const drop = weatherDrops[i];
         if (isCityRain) {
-          // High-speed slanted neon rain streaks fixed in world space
-          drop.ry -= (44 + drop.speedY * 18) * worldAnimDt;
-          drop.rx -= 4.5 * worldAnimDt;
+          // Multi-layer high-velocity slanted cyber-storm rain streaks fixed in world space
+          const layerSpeedMul = drop.layer === 0 ? 1.28 : drop.layer === 1 ? 1.0 : 0.78;
+          drop.ry -= (52 + drop.speedY * 22) * layerSpeedMul * worldAnimDt;
+          drop.rx += windGustX * layerSpeedMul * worldAnimDt;
+          drop.rz += windGustZ * layerSpeedMul * worldAnimDt;
 
           const offsetX = ((((drop.rx - camera.position.x + halfXZ) % spanXZ) + spanXZ) % spanXZ) - halfXZ;
           const offsetY = ((((drop.ry - camera.position.y + halfY) % spanY) + spanY) % spanY) - halfY;
@@ -3282,11 +4112,16 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
           const wy = camera.position.y + offsetY;
           const wz = camera.position.z + offsetZ;
           const camDistSq = offsetX * offsetX + offsetY * offsetY + offsetZ * offsetZ;
-          const nearFade = THREE.MathUtils.smoothstep(camDistSq, 36, 120);
+          const nearFade = THREE.MathUtils.smoothstep(camDistSq, 28, 110);
+          const streakLen =
+            (drop.layer === 0 ? 2.55 : drop.layer === 1 ? 1.95 : 1.35) *
+            drop.scale *
+            nearFade;
+          const streakThick = (drop.layer === 0 ? 0.038 : 0.028) * nearFade;
 
           _weatherDummy.position.set(wx, nearFade <= 0.01 ? -999 : wy, wz);
-          _weatherDummy.rotation.set(0.18, 0, 0.10);
-          _weatherDummy.scale.set(0.032 * nearFade, 1.85 * drop.scale * nearFade, 0.032 * nearFade);
+          _weatherDummy.rotation.set(0.21, 0, 0.13 + Math.sin(timeSec * 1.4) * 0.04);
+          _weatherDummy.scale.set(streakThick, streakLen, streakThick);
         } else {
           // Buoyant glowing volcanic ember sparks rising upward from the molten lava below with convective thermal swirl
           drop.ry +=
@@ -3592,6 +4427,8 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
           lastCollectedWeapon: player.lastCollectedWeapon,
           lastCollectedTimer: Number(player.lastCollectedTimer.toFixed(1)),
           ringChain: player.ringChain,
+          boostComboCount: player.boostComboCount ?? 0,
+          boostComboTimer: Number((player.boostComboTimer ?? 0).toFixed(2)),
           shieldActive: player.shieldTimer > 0,
           shieldRemainingSec: Number(player.shieldTimer.toFixed(1)),
           laserActive: player.laserActiveTimer > 0,
@@ -3662,6 +4499,7 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
       trackSsaoPass.uniforms.uResolution.value.set(w, h);
       bloom.resolution.set(w, h);
       motionLinesPass.uniforms.uAspect.value = w / h;
+      stormRainPass.uniforms.uAspect.value = w / h;
     };
     window.addEventListener('resize', onResize);
 
@@ -3674,11 +4512,19 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
       window.removeEventListener('mouseup', onPointerUp);
       domElem.removeEventListener('wheel', onWheel);
       domElem.removeEventListener('contextmenu', onContextMenu);
-      window.removeEventListener('keydown', onKeyDown);
-      window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('keydown', onKeyDown, { capture: true });
+      window.removeEventListener('keyup', onKeyUp, { capture: true });
+      document.removeEventListener('keydown', onKeyDown);
+      document.removeEventListener('keyup', onKeyUp);
+      container.removeEventListener('keydown', onKeyDown);
+      container.removeEventListener('keyup', onKeyUp);
       window.removeEventListener('blur', clearInputs);
       window.removeEventListener('resize', onResize);
       audioEngine.stopEngine();
+      stormCanopyGeo.dispose();
+      stormCanopyMat.dispose();
+      stormVortexGeo.dispose();
+      stormVortexMat.dispose();
       trackNormalDepthTarget.dispose();
       trackNormalDepthMaterial.dispose();
       composer.dispose();
@@ -3730,8 +4576,9 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
   return (
     <div
       ref={mountRef}
+      tabIndex={0}
       data-testid="racing-canvas-container"
-      className="fixed inset-0 w-full h-full overflow-hidden bg-[#05070d]"
+      className="movement-control-container fixed inset-0 w-full h-full overflow-hidden bg-[#05070d] outline-none"
     />
   );
 };

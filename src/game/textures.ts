@@ -48,10 +48,107 @@ export interface TrackTextureSet {
   volcanicBasaltLavaMaskMap: THREE.Texture;
   // Seamless 4-channel RGBA turbulence/cloud texture (texture1 for TheGameMaker WebGL lava shader)
   lavaCloudMap: THREE.DataTexture;
+  // Updates animated textures (16 multi-frame WebP City advertising panels)
+  updateAnimatedTextures: (timeSec: number) => void;
 }
 
 const _textureLoader = new THREE.TextureLoader();
 const _imageCache = new Map<string, HTMLImageElement>();
+const _webpFramesCache = new Map<string, ImageBitmap[]>();
+const _webpLoadingSet = new Set<string>();
+
+export const CITY_ANIMATED_WEBP_PANELS: ReadonlyArray<{
+  url: string;
+  u0: number;
+  v0: number;
+  u1: number;
+  v1: number;
+}> = [
+  // #0 VERT_NEO_TOKYO_CYBORG
+  { url: '/assets/aistudio/01_neon_rider_vertical_c65dba73.webp', u0: 0.012, v0: 0.562, u1: 0.123, v1: 0.968 },
+  // #1 AD_NEO_KOLA_CAN
+  { url: '/assets/aistudio/02_neo_kola_can_063cb08d.webp', u0: 0.132, v0: 0.780, u1: 0.312, v1: 0.963 },
+  // #2 AD_NEO_KOLA_ANDROID
+  { url: '/assets/aistudio/03_neo_kola_android_de0cb050.webp', u0: 0.322, v0: 0.780, u1: 0.520, v1: 0.963 },
+  // #3 AD_CYBBCORE_ANDROID
+  { url: '/assets/aistudio/04_cybercore_android_d0e13588.webp', u0: 0.530, v0: 0.780, u1: 0.728, v1: 0.963 },
+  // #4 VERT_NEO_TOKYO_WOMAN_TOP
+  { url: '/assets/aistudio/05_neo_tokyo_motors_portrait_80aefe51.webp', u0: 0.742, v0: 0.540, u1: 0.865, v1: 0.965 },
+  // #5 AD_CYBERNETICS_NOW
+  { url: '/assets/aistudio/06_cybernetics_now_72a86dc1.webp', u0: 0.132, v0: 0.540, u1: 0.328, v1: 0.752 },
+  // #6 AD_SHIBUYA_DRIFT
+  { url: '/assets/aistudio/07_shibuya_drift_4fc271b7.webp', u0: 0.338, v0: 0.540, u1: 0.528, v1: 0.752 },
+  // #7 AD_GLITCH_GEAR
+  { url: '/assets/aistudio/08_glitch_gear_147f715b.webp', u0: 0.538, v0: 0.540, u1: 0.728, v1: 0.752 },
+  // #8 VERT_KANJI_NEON
+  { url: '/assets/aistudio/09_neon_city_vertical_ac9de690.webp', u0: 0.012, v0: 0.032, u1: 0.115, v1: 0.525 },
+  // #9 AD_NEO_TOKYO_MOTORS_LOGO
+  { url: '/assets/aistudio/10_neo_tokyo_motors_logo_0183a229.webp', u0: 0.128, v0: 0.285, u1: 0.302, v1: 0.505 },
+  // #10 AD_CYBERDYNE_PYRAMID
+  { url: '/assets/aistudio/11_cyberdyne_triangle_9fbf1233.webp', u0: 0.312, v0: 0.285, u1: 0.508, v1: 0.505 },
+  // #11 AD_GLITCH_COLA
+  { url: '/assets/aistudio/12_glitch_cola_b08c9f27.webp', u0: 0.518, v0: 0.285, u1: 0.712, v1: 0.505 },
+  // #12 VERT_NEO_TOKYO_CRT
+  { url: '/assets/aistudio/13_neo_tokyo_motors_chip_7ccc353d.webp', u0: 0.725, v0: 0.032, u1: 0.858, v1: 0.505 },
+  // #13 VERT_NEO_TOKYO_WOMAN_FULL
+  { url: '/assets/aistudio/14_neo_tokyo_motors_full_body_9a81bbf1.webp', u0: 0.870, v0: 0.032, u1: 0.985, v1: 0.505 },
+  // #14 AD_NEO_TOKYO_MOTORS_WIDE
+  { url: '/assets/aistudio/15_neo_tokyo_motors_android_9e5c8760.webp', u0: 0.128, v0: 0.032, u1: 0.508, v1: 0.258 },
+  // #15 AD_CYBERDYNE_SLASH
+  { url: '/assets/aistudio/16_cyberdyne_glitch_e1716177.webp', u0: 0.518, v0: 0.032, u1: 0.712, v1: 0.258 },
+];
+
+function decodeAnimatedWebpFrames(url: string, onDecoded?: () => void): void {
+  if (_webpFramesCache.has(url) || _webpLoadingSet.has(url)) {
+    if (_webpFramesCache.has(url) && onDecoded) onDecoded();
+    return;
+  }
+  _webpLoadingSet.add(url);
+
+  // Also load standard HTMLImageElement fallback immediately
+  loadCachedImage(url, () => {
+    if (onDecoded) onDecoded();
+  });
+
+  const AnyImageDecoder = (globalThis as unknown as {
+    ImageDecoder?: new (init: { data: BufferSource; type: string }) => {
+      tracks: { ready: Promise<void>; selectedTrack?: { frameCount: number } };
+      decode: (opts: { frameIndex: number }) => Promise<{ image: VideoFrame }>;
+      close: () => void;
+    };
+  }).ImageDecoder;
+
+  if (!AnyImageDecoder || typeof fetch !== 'function' || typeof createImageBitmap !== 'function') {
+    _webpLoadingSet.delete(url);
+    return;
+  }
+
+  fetch(url)
+    .then((res) => (res.ok ? res.arrayBuffer() : Promise.reject(new Error('fetch failed'))))
+    .then(async (buf) => {
+      const decoder = new AnyImageDecoder({ data: buf, type: 'image/webp' });
+      await decoder.tracks.ready;
+      const frameCount = Math.min(32, Math.max(1, decoder.tracks.selectedTrack?.frameCount ?? 16));
+      const bitmaps: ImageBitmap[] = [];
+      for (let i = 0; i < frameCount; i++) {
+        const { image } = await decoder.decode({ frameIndex: i });
+        const bmp = await createImageBitmap(image);
+        image.close();
+        bitmaps.push(bmp);
+      }
+      decoder.close();
+      if (bitmaps.length > 0) {
+        _webpFramesCache.set(url, bitmaps);
+        if (onDecoded) onDecoded();
+      }
+    })
+    .catch(() => {
+      // Fallback already handled via loadCachedImage
+    })
+    .finally(() => {
+      _webpLoadingSet.delete(url);
+    });
+}
 
 function loadCachedImage(url: string, onReady: (img: HTMLImageElement) => void): void {
   const cached = _imageCache.get(url);
@@ -278,18 +375,81 @@ export function createProceduralTextures(
     2,
     32
   );
-  const cityDecorativeAtlasMap = _textureLoader.load(
-    '/assets/aistudio/decorative2k_bbaeeaee.jpg',
-    (loaded) => {
-      loaded.needsUpdate = true;
-    }
-  );
+  // Dynamic 2048x1144 CanvasTexture for the 16 animated City advertising WebP panels
+  const cityAtlasCanvas = document.createElement('canvas');
+  cityAtlasCanvas.width = 2048;
+  cityAtlasCanvas.height = 1144;
+  const cityAtlasCtx = cityAtlasCanvas.getContext('2d')!;
+  cityAtlasCtx.fillStyle = '#060812';
+  cityAtlasCtx.fillRect(0, 0, 2048, 1144);
+
+  const cityDecorativeAtlasMap = new THREE.CanvasTexture(cityAtlasCanvas);
   cityDecorativeAtlasMap.colorSpace = THREE.SRGBColorSpace;
   cityDecorativeAtlasMap.wrapS = THREE.ClampToEdgeWrapping;
   cityDecorativeAtlasMap.wrapT = THREE.ClampToEdgeWrapping;
-  cityDecorativeAtlasMap.minFilter = THREE.LinearMipmapLinearFilter;
+  cityDecorativeAtlasMap.minFilter = THREE.LinearFilter;
   cityDecorativeAtlasMap.magFilter = THREE.LinearFilter;
+  cityDecorativeAtlasMap.generateMipmaps = false;
   cityDecorativeAtlasMap.anisotropy = maxAniso;
+
+  let lastAnimatedFrameTick = -1;
+  let dirtyAnimatedAtlas = true;
+
+  const drawCityAnimatedWebpAtlas = (frameTick: number) => {
+    const W = cityAtlasCanvas.width;
+    const H = cityAtlasCanvas.height;
+    let drewAny = false;
+
+    for (let i = 0; i < CITY_ANIMATED_WEBP_PANELS.length; i++) {
+      const p = CITY_ANIMATED_WEBP_PANELS[i];
+      const dx = Math.round(p.u0 * W);
+      const dy = Math.round((1 - p.v1) * H);
+      const dw = Math.round((p.u1 - p.u0) * W);
+      const dh = Math.round((p.v1 - p.v0) * H);
+
+      const frames = _webpFramesCache.get(p.url);
+      if (frames && frames.length > 0) {
+        // Stagger frame phase slightly per ad panel for organic multi-screen city life
+        const fIdx = (frameTick + i * 2) % frames.length;
+        cityAtlasCtx.drawImage(frames[fIdx], dx, dy, dw, dh);
+        drewAny = true;
+      } else {
+        const fallbackImg = _imageCache.get(p.url);
+        if (fallbackImg && fallbackImg.complete && fallbackImg.naturalWidth > 0) {
+          cityAtlasCtx.drawImage(fallbackImg, dx, dy, dw, dh);
+          drewAny = true;
+        }
+      }
+    }
+
+    if (drewAny) {
+      cityDecorativeAtlasMap.needsUpdate = true;
+    }
+  };
+
+  // Seed base atlas immediately with decorative2k_bbaeeaee.jpg and kick off all 16 animated WebP decodes
+  loadCachedImage('/assets/aistudio/decorative2k_bbaeeaee.jpg', (baseImg) => {
+    cityAtlasCtx.drawImage(baseImg, 0, 0, cityAtlasCanvas.width, cityAtlasCanvas.height);
+    dirtyAnimatedAtlas = true;
+    drawCityAnimatedWebpAtlas(0);
+    cityDecorativeAtlasMap.needsUpdate = true;
+  });
+
+  for (let i = 0; i < CITY_ANIMATED_WEBP_PANELS.length; i++) {
+    decodeAnimatedWebpFrames(CITY_ANIMATED_WEBP_PANELS[i].url, () => {
+      dirtyAnimatedAtlas = true;
+    });
+  }
+
+  const updateAnimatedTextures = (timeSec: number) => {
+    // 16 frames @ 125ms per frame = 8 FPS native animation rate for the 16 WebP panels
+    const frameTick = Math.floor(timeSec * 8);
+    if (frameTick !== lastAnimatedFrameTick || dirtyAnimatedAtlas) {
+      lastAnimatedFrameTick = frameTick;
+      dirtyAnimatedAtlas = false;
+      drawCityAnimatedWebpAtlas(Math.max(0, frameTick));
+    }
+  };
 
   // Load the 2 High-Resolution Lava Circuit Cyberpunk Decorative Atlases
   const lavaDecorativeAtlas1Map = _textureLoader.load(
@@ -583,38 +743,6 @@ export function createProceduralTextures(
       eCtx.fillRect(centerX + 28, dy, 10, 84);
     }
   }
-
-  // Crisp Outlined Triple-Chevron Lane Arrows
-  const drawTripleChevron = (
-    ctx: CanvasRenderingContext2D,
-    cx: number,
-    cy: number,
-    width: number,
-    height: number,
-    color: string
-  ) => {
-    ctx.save();
-    ctx.fillStyle = color;
-    for (let c = 0; c < 3; c++) {
-      const offsetY = cy + c * 36;
-      ctx.beginPath();
-      ctx.moveTo(cx, offsetY - height * 0.54);
-      ctx.lineTo(cx + width * 0.52, offsetY + height * 0.18);
-      ctx.lineTo(cx + width * 0.52, offsetY + height * 0.54);
-      ctx.lineTo(cx, offsetY - height * 0.16);
-      ctx.lineTo(cx - width * 0.52, offsetY + height * 0.54);
-      ctx.lineTo(cx - width * 0.52, offsetY + height * 0.18);
-      ctx.closePath();
-      ctx.fill();
-    }
-    ctx.restore();
-  };
-
-  drawTripleChevron(rCtx, 258, 210, 136, 38, primaryTrackAccent);
-  drawTripleChevron(eCtx, 258, 210, 136, 38, primaryTrackEmissive);
-
-  drawTripleChevron(rCtx, 766, 690, 136, 38, primaryTrackAccent);
-  drawTripleChevron(eCtx, 766, 690, 136, 38, primaryTrackEmissive);
 
   const roadMap = new THREE.CanvasTexture(roadCanvas);
   roadMap.colorSpace = THREE.SRGBColorSpace;
@@ -984,55 +1112,155 @@ export function createProceduralTextures(
   const thrusterFlareMap = new THREE.CanvasTexture(flareCanvas);
   thrusterFlareMap.colorSpace = THREE.SRGBColorSpace;
 
-  // 5. Turn Warning Chevron Sign Texture (`>>`)
+  // 5. Turn Warning Triple-Chevron Sign Texture (`>>>` matching FLOWING ARROWS / HAIRPIN decal style)
   const signCanvas = document.createElement('canvas');
-  signCanvas.width = 256;
+  signCanvas.width = 512;
   signCanvas.height = 256;
   const sgCtx = signCanvas.getContext('2d')!;
-  sgCtx.fillStyle = '#070a12';
-  sgCtx.fillRect(0, 0, 256, 256);
-  sgCtx.strokeStyle = '#f97316';
-  sgCtx.lineWidth = 10;
-  sgCtx.strokeRect(8, 8, 240, 240);
+  sgCtx.fillStyle = '#060911';
+  sgCtx.fillRect(0, 0, 512, 256);
 
-  sgCtx.shadowColor = '#fb923c';
-  sgCtx.shadowBlur = 16;
-  sgCtx.fillStyle = '#fb923c';
-  sgCtx.beginPath();
-  sgCtx.moveTo(65, 45);
-  sgCtx.lineTo(155, 128);
-  sgCtx.lineTo(65, 211);
-  sgCtx.lineTo(105, 211);
-  sgCtx.lineTo(195, 128);
-  sgCtx.lineTo(105, 45);
-  sgCtx.closePath();
-  sgCtx.fill();
+  // Dark beveled gunmetal frame with corner bolts
+  sgCtx.strokeStyle = '#1e293b';
+  sgCtx.lineWidth = 14;
+  sgCtx.strokeRect(7, 7, 498, 242);
+
+  // Top & bottom glowing red-amber LED rails (matching Screenshot_from_2026-10-29_22-06-44)
+  const railGrad = sgCtx.createLinearGradient(0, 0, 512, 0);
+  railGrad.addColorStop(0, '#ea580c');
+  railGrad.addColorStop(0.5, '#fef08a');
+  railGrad.addColorStop(1, '#ef4444');
+  sgCtx.fillStyle = railGrad;
+  sgCtx.shadowColor = '#f97316';
+  sgCtx.shadowBlur = 14;
+  sgCtx.fillRect(18, 14, 476, 8);
+  sgCtx.fillRect(18, 234, 476, 8);
+
+  // 3 stacked directional chevrons (`>>>`) with IDLE -> FLOWING ARROWS brightness progression
+  const chevXs = [58, 198, 338];
+  const chevAlphas = [0.42, 0.88, 1.0];
+  for (let c = 0; c < 3; c++) {
+    const cx = chevXs[c];
+    const alpha = chevAlphas[c];
+    sgCtx.save();
+    sgCtx.globalAlpha = alpha;
+    sgCtx.shadowColor = c === 2 ? '#ff4500' : '#f59e0b';
+    sgCtx.shadowBlur = c === 2 ? 24 : 16;
+
+    const cGrad = sgCtx.createLinearGradient(cx, 38, cx + 115, 218);
+    cGrad.addColorStop(0, c === 2 ? '#fef08a' : '#fbbf24');
+    cGrad.addColorStop(0.55, '#f97316');
+    cGrad.addColorStop(1, '#ef4444');
+    sgCtx.fillStyle = cGrad;
+
+    sgCtx.beginPath();
+    sgCtx.moveTo(cx, 42);
+    sgCtx.lineTo(cx + 56, 42);
+    sgCtx.lineTo(cx + 112, 128);
+    sgCtx.lineTo(cx + 56, 214);
+    sgCtx.lineTo(cx, 214);
+    sgCtx.lineTo(cx + 56, 128);
+    sgCtx.closePath();
+    sgCtx.fill();
+
+    // Crisp bright edge outline
+    sgCtx.strokeStyle = c === 2 ? '#ffffff' : '#fde047';
+    sgCtx.lineWidth = 3;
+    sgCtx.stroke();
+    sgCtx.restore();
+  }
 
   const chevronSignMap = new THREE.CanvasTexture(signCanvas);
   chevronSignMap.colorSpace = THREE.SRGBColorSpace;
 
   // Composite authored road textures deterministically into the road deck texture
   let panelImg: HTMLImageElement | null = null;
-  let laneImg: HTMLImageElement | null = null;
   let cyanPanelImg: HTMLImageElement | null = null;
 
   // City V2 dedicated road deck textures
   let cityWetImg: HTMLImageElement | null = null;
-  let cityLaneImg: HTMLImageElement | null = null;
   let cityCorridorImg: HTMLImageElement | null = null;
-  let cityMagentaImg: HTMLImageElement | null = null;
+
+  // Helper to paint the beveled metallic road tile grid & alternating Cyan/Amber-Orange embedded curb lights
+  // matching the In-Game Examples in `good_game_assets_aacb9e02.png` and `Screenshot_from_2026-10-29_22-07-54_7c765c69.png`
+  const drawBeveledRoadTilesAndCurbLights = (isCityDeck: boolean) => {
+    // 1) Segmented Metallic Roadway Tile Seams & Bevel Highlights (across the driving deck)
+    for (let s = 0; s < 8; s++) {
+      const y = (s * 1024) / 8;
+      // Dark recessed transverse expansion joint
+      rCtx.fillStyle = '#020409';
+      rCtx.fillRect(58, y, 1024 - 116, 7);
+      // Specular metallic bevel edge along tile lip
+      rCtx.fillStyle = isCityDeck ? '#1e293b' : '#263248';
+      rCtx.fillRect(58, y + 7, 1024 - 116, 3);
+      // Bump map crease
+      bCtx.fillStyle = '#050505';
+      bCtx.fillRect(29, y * 0.5, 512 - 58, 4);
+    }
+    // Longitudinal armor plate seam lines with subtle rivet dots
+    const seamXs = [168, 340, 512, 684, 856];
+    for (const sx of seamXs) {
+      rCtx.fillStyle = 'rgba(2, 5, 12, 0.72)';
+      rCtx.fillRect(sx - 2, 0, 4, 1024);
+      rCtx.fillStyle = 'rgba(56, 189, 248, 0.12)';
+      rCtx.fillRect(sx + 2, 0, 2, 1024);
+    }
+
+    // 2) Beveled Dark Gunmetal Outer Curb Housing with Alternating Cyan (#00e5ff) & Amber-Orange (#ff8c00)
+    // Recessed Rectangular LED Curb Modules (matching `Screenshot_from_2026-10-29_22-07-54_7c765c69.png`)
+    rCtx.fillStyle = '#0b111e';
+    rCtx.fillRect(0, 0, 54, 1024);
+    rCtx.fillRect(1024 - 54, 0, 54, 1024);
+
+    // Metallic bevel lip separating curb housing from road deck
+    rCtx.fillStyle = '#334155';
+    rCtx.fillRect(50, 0, 4, 1024);
+    rCtx.fillRect(1024 - 54, 0, 4, 1024);
+
+    for (let cy = 0; cy < 1024; cy += 64) {
+      const slotIdx = Math.floor(cy / 64);
+      const isCyanModule = slotIdx % 2 === 0;
+      const coreColor = isCyanModule ? '#38bdf8' : '#fb923c';
+      const hotCenterColor = isCyanModule ? '#e0f2fe' : '#fef08a';
+      const emissiveColor = isCyanModule ? '#00e5ff' : '#ff7b00';
+
+      // Dark bolted curb recess plate
+      rCtx.fillStyle = '#050811';
+      rCtx.fillRect(6, cy + 4, 38, 56);
+      rCtx.fillRect(1024 - 44, cy + 4, 38, 56);
+      rCtx.strokeStyle = '#1e293b';
+      rCtx.lineWidth = 2;
+      rCtx.strokeRect(6, cy + 4, 38, 56);
+      rCtx.strokeRect(1024 - 44, cy + 4, 38, 56);
+
+      // Glowing rectangular LED module inset
+      rCtx.fillStyle = coreColor;
+      rCtx.fillRect(12, cy + 12, 26, 40);
+      rCtx.fillRect(1024 - 38, cy + 12, 26, 40);
+
+      // White-hot inner filament core
+      rCtx.fillStyle = hotCenterColor;
+      rCtx.fillRect(17, cy + 18, 16, 28);
+      rCtx.fillRect(1024 - 33, cy + 18, 16, 28);
+
+      if (isNeon) {
+        eCtx.fillStyle = emissiveColor;
+        eCtx.fillRect(11, cy + 11, 28, 42);
+        eCtx.fillRect(1024 - 39, cy + 11, 28, 42);
+      }
+    }
+  };
 
   const compositeRoadOverlays = () => {
     if (isCityV2) {
       // Upgraded Cyber-City MK-II Road Deck:
-      // Establish a deep, solid carbon-anthracite base (#060911) so the playable road never blends into the blue/violet skyline
+      // Deep carbon-anthracite metallic base (#060911) with beveled armor tiles & Cyan/Amber curb lights
       rCtx.fillStyle = isNeon ? '#060911' : '#1e2430';
       rCtx.fillRect(0, 0, 1024, 1024);
 
-      // 1) Subtle wet panel surface texture from 01_wet_neon_track_92d2e945.png (low color alpha 0.22 so road stays dark carbon, full bump relief)
       if (cityWetImg) {
         rCtx.save();
-        rCtx.globalAlpha = isNeon ? 0.22 : 0.35;
+        rCtx.globalAlpha = isNeon ? 0.24 : 0.35;
         for (let tx = 0; tx < 2; tx++) {
           for (let ty = 0; ty < 4; ty++) {
             rCtx.drawImage(cityWetImg, tx * 512, ty * 256, 512, 256);
@@ -1040,9 +1268,8 @@ export function createProceduralTextures(
         }
         rCtx.restore();
 
-        // Darken driving lanes slightly for ultra-clean contrast under the ship and markings
-        rCtx.fillStyle = isNeon ? 'rgba(5, 8, 15, 0.58)' : 'rgba(24, 30, 42, 0.42)';
-        rCtx.fillRect(68, 0, 1024 - 136, 1024);
+        rCtx.fillStyle = isNeon ? 'rgba(5, 8, 15, 0.56)' : 'rgba(24, 30, 42, 0.42)';
+        rCtx.fillRect(58, 0, 1024 - 116, 1024);
 
         bCtx.save();
         bCtx.globalAlpha = 0.85;
@@ -1052,132 +1279,78 @@ export function createProceduralTextures(
           }
         }
         bCtx.restore();
-        roadBumpMap.needsUpdate = true;
       }
 
-      // Horizontal dark expansion joints across road plates
-      for (let s = 0; s < 8; s++) {
-        const y = (s * 1024) / 8;
-        rCtx.fillStyle = '#03050a';
-        rCtx.fillRect(64, y, 1024 - 128, 8);
-        rCtx.fillStyle = '#1e293b';
-        rCtx.fillRect(64, y + 8, 1024 - 128, 2);
-      }
-
-      // 2) Authentic 04_lane_marked_asphalt_114cfdbd.png blended along the center spine & lane dividers
-      if (cityLaneImg) {
-        rCtx.save();
-        rCtx.globalAlpha = 0.52;
-        for (let ty = 0; ty < 4; ty++) {
-          rCtx.drawImage(cityLaneImg, centerX - 78, ty * 256, 156, 256);
-        }
-        rCtx.restore();
-      }
-
-      // 3) 08_cyan_corridor_floor_bf8dbc94.png along the recessed outer technical service gutters
       if (cityCorridorImg) {
         rCtx.save();
-        rCtx.globalAlpha = 0.42;
+        rCtx.globalAlpha = 0.38;
         for (let ty = 0; ty < 4; ty++) {
-          rCtx.drawImage(cityCorridorImg, 44, ty * 256, 56, 256);
-          rCtx.drawImage(cityCorridorImg, 1024 - 100, ty * 256, 56, 256);
+          rCtx.drawImage(cityCorridorImg, 54, ty * 256, 52, 256);
+          rCtx.drawImage(cityCorridorImg, 1024 - 106, ty * 256, 52, 256);
         }
         rCtx.restore();
       }
 
-      // 4) High-Contrast Heterogeneous Track Framing & Lane Telemetry (Warm Solar Gold #fbbf24 + Pure Crisp White #f8fafc)
-      // Creates unmistakable chromatic & value separation from the cool blue/indigo/violet city buildings & sky!
       rCtx.save();
       eCtx.save();
       eCtx.fillStyle = '#000000';
       eCtx.fillRect(0, 0, 1024, 1024);
 
-      // Alternating Solar-Gold & Dark-Anthracite Outer Hazard Rumble Curbs
-      for (let cy = 0; cy < 1024; cy += 64) {
-        const isGold = (cy / 64) % 2 === 0;
-        rCtx.fillStyle = isGold ? '#fbbf24' : '#0f172a';
-        rCtx.fillRect(6, cy, 34, 58);
-        rCtx.fillRect(1024 - 40, cy, 34, 58);
+      drawBeveledRoadTilesAndCurbLights(true);
 
-        if (isNeon && isGold) {
-          eCtx.fillStyle = '#f59e0b';
-          eCtx.fillRect(6, cy, 34, 58);
-          eCtx.fillRect(1024 - 40, cy, 34, 58);
-        }
-      }
-
-      // Continuous Bright Solar-Gold & Crisp-White Track Edge Boundary Lines
+      // Continuous Bright Solar-Gold & Electric-Cyan Outer Track Boundary Lines
       rCtx.fillStyle = '#fbbf24';
-      rCtx.fillRect(44, 0, 14, 1024);
-      rCtx.fillRect(1024 - 58, 0, 14, 1024);
+      rCtx.fillRect(56, 0, 10, 1024);
+      rCtx.fillRect(1024 - 66, 0, 10, 1024);
 
-      rCtx.fillStyle = '#ffffff';
-      rCtx.fillRect(62, 0, 6, 1024);
-      rCtx.fillRect(1024 - 68, 0, 6, 1024);
+      rCtx.fillStyle = '#38bdf8';
+      rCtx.fillRect(70, 0, 6, 1024);
+      rCtx.fillRect(1024 - 76, 0, 6, 1024);
 
-      // Center Spine + Crisp White & Solar-Gold Racing Lane Dashes
-      rCtx.fillStyle = '#03050a';
-      rCtx.fillRect(centerX - 24, 0, 48, 1024);
+      // Center Spine + Racing Lane Dashes
       rCtx.fillStyle = '#fbbf24';
-      rCtx.fillRect(centerX - 5, 0, 10, 1024);
+      rCtx.fillRect(centerX - 4, 0, 8, 1024);
 
       for (let dy = 14; dy < 1024; dy += 64) {
-        // Centerline flanking white dashes
-        rCtx.fillStyle = '#f8fafc';
-        rCtx.fillRect(centerX - 26, dy, 8, 40);
-        rCtx.fillRect(centerX + 18, dy, 8, 40);
-
-        // Left & right intermediate lane dividers (crisp warm gold)
         rCtx.fillStyle = '#fbbf24';
         rCtx.fillRect(268, dy, 8, 38);
         rCtx.fillRect(1024 - 276, dy, 8, 38);
 
         if (isNeon) {
-          eCtx.fillStyle = '#cbd5e1';
-          eCtx.fillRect(centerX - 26, dy, 8, 40);
-          eCtx.fillRect(centerX + 18, dy, 8, 40);
-
           eCtx.fillStyle = '#d97706';
           eCtx.fillRect(268, dy, 8, 38);
           eCtx.fillRect(1024 - 276, dy, 8, 38);
         }
       }
 
-      // High-Visibility Solar-Gold & Crisp-White Directional Racing Chevrons
-      drawTripleChevron(rCtx, 368, 220, 118, 34, '#fbbf24');
-      drawTripleChevron(rCtx, 656, 732, 118, 34, '#f8fafc');
-
       if (isNeon) {
         eCtx.fillStyle = '#f59e0b';
-        eCtx.fillRect(44, 0, 14, 1024);
-        eCtx.fillRect(1024 - 58, 0, 14, 1024);
-        eCtx.fillRect(centerX - 5, 0, 10, 1024);
+        eCtx.fillRect(56, 0, 10, 1024);
+        eCtx.fillRect(1024 - 66, 0, 10, 1024);
+        eCtx.fillRect(centerX - 4, 0, 8, 1024);
 
-        eCtx.fillStyle = '#e2e8f0';
-        eCtx.fillRect(62, 0, 6, 1024);
-        eCtx.fillRect(1024 - 68, 0, 6, 1024);
-
-        drawTripleChevron(eCtx, 368, 220, 118, 34, '#d97706');
-        drawTripleChevron(eCtx, 656, 732, 118, 34, '#94a3b8');
+        eCtx.fillStyle = '#00e5ff';
+        eCtx.fillRect(70, 0, 6, 1024);
+        eCtx.fillRect(1024 - 76, 0, 6, 1024);
       }
 
       eCtx.restore();
       rCtx.restore();
 
+      roadBumpMap.needsUpdate = true;
       roadMap.needsUpdate = true;
       roadEmissiveMap.needsUpdate = true;
       return;
     }
 
     if (trackId === 'lava_v2') {
-      // V2 Textured Lava Circuit:
-      // 1) Cool dark slate-obsidian road plates (01_roadway_panels.png) contrasting against the warm orange/red volcanic terrain
+      // V2 Textured Lava Circuit matching the In-Game Examples in `good_game_assets_aacb9e02.png`!
       rCtx.fillStyle = '#060a14';
       rCtx.fillRect(0, 0, 1024, 1024);
 
       if (panelImg) {
         rCtx.save();
-        rCtx.globalAlpha = 0.78;
+        rCtx.globalAlpha = 0.80;
         for (let tx = 0; tx < 2; tx++) {
           for (let ty = 0; ty < 4; ty++) {
             rCtx.drawImage(panelImg, tx * 512, ty * 256, 512, 256);
@@ -1193,123 +1366,87 @@ export function createProceduralTextures(
           }
         }
         bCtx.restore();
-        roadBumpMap.needsUpdate = true;
       }
 
-      // 2) Authentic 06_amber_lane_markings.png along the center double-amber spine
-      if (laneImg) {
-        rCtx.save();
-        rCtx.globalAlpha = 0.92;
-        for (let ty = 0; ty < 4; ty++) {
-          rCtx.drawImage(laneImg, centerX - 68, ty * 256, 136, 256);
-        }
-        rCtx.restore();
-      }
-
-      // 3) Selectively composite 05_cyan_neon_surface.png along the outer left & right curb trim panels
       if (cyanPanelImg) {
         rCtx.save();
-        rCtx.globalAlpha = 0.95;
+        rCtx.globalAlpha = 0.45;
         for (let ty = 0; ty < 4; ty++) {
           rCtx.save();
-          rCtx.translate(36, ty * 256 + 128);
+          rCtx.translate(64, ty * 256 + 128);
           rCtx.rotate(Math.PI / 2);
-          rCtx.drawImage(cyanPanelImg, -128, -36, 256, 72);
+          rCtx.drawImage(cyanPanelImg, -128, -24, 256, 48);
           rCtx.restore();
 
           rCtx.save();
-          rCtx.translate(1024 - 36, ty * 256 + 128);
+          rCtx.translate(1024 - 64, ty * 256 + 128);
           rCtx.rotate(-Math.PI / 2);
-          rCtx.drawImage(cyanPanelImg, -128, -36, 256, 72);
+          rCtx.drawImage(cyanPanelImg, -128, -24, 256, 48);
           rCtx.restore();
         }
         rCtx.restore();
       }
 
-      // Cool Electric Cyan (#00f2fe), Cobalt Blue (#3b82f6), Amber-Orange (#f97316), & Crisp Ice-White (#ffffff)
-      // Matches the "Track (Metallic, Wet, Reflective, Blue/Orange Lanes)" swatch from Sheet 2 & Reference Image
-      // while preserving a deep carbon-obsidian base for unmistakable figure-ground separation!
       rCtx.save();
       eCtx.save();
       eCtx.fillStyle = '#000000';
       eCtx.fillRect(0, 0, 1024, 1024);
 
-      for (let cy = 0; cy < 1024; cy += 64) {
-        const isCyan = (cy / 64) % 2 === 0;
-        rCtx.fillStyle = isCyan ? '#00f2fe' : '#0f172a';
-        rCtx.fillRect(6, cy, 28, 58);
-        rCtx.fillRect(1024 - 34, cy, 28, 58);
-        if (isNeon && isCyan) {
-          eCtx.fillStyle = '#0284c7';
-          eCtx.fillRect(6, cy, 28, 58);
-          eCtx.fillRect(1024 - 34, cy, 28, 58);
-        }
-      }
+      drawBeveledRoadTilesAndCurbLights(false);
 
-      // Continuous Electric Cyan & Crisp White Outer Track Boundary Lines
+      // Continuous Electric Cyan & Warm Amber Outer Track Boundary Lines
       rCtx.fillStyle = '#00f2fe';
-      rCtx.fillRect(38, 0, 12, 1024);
-      rCtx.fillRect(1024 - 50, 0, 12, 1024);
-      rCtx.fillStyle = '#ffffff';
-      rCtx.fillRect(54, 0, 5, 1024);
-      rCtx.fillRect(1024 - 59, 0, 5, 1024);
-
-      // Parallel Blue & Orange Longitudinal Lane Stripes (from Reference Image "Blue/Orange Lanes" swatch)
-      // Left lane pair: Electric Blue (#38bdf8) + Vibrant Orange (#f97316)
+      rCtx.fillRect(56, 0, 10, 1024);
+      rCtx.fillRect(1024 - 66, 0, 10, 1024);
       rCtx.fillStyle = '#f97316';
-      rCtx.fillRect(184, 0, 9, 1024);
-      rCtx.fillRect(1024 - 193, 0, 9, 1024);
-      rCtx.fillStyle = '#38bdf8';
-      rCtx.fillRect(200, 0, 9, 1024);
-      rCtx.fillRect(1024 - 209, 0, 9, 1024);
+      rCtx.fillRect(70, 0, 6, 1024);
+      rCtx.fillRect(1024 - 76, 0, 6, 1024);
 
-      // Center double-amber spine + Luminous Twin White-Cyan Tracking Dashes (matching Reference Image foreground road)
+      // Parallel Blue & Orange Longitudinal Lane Stripes
+      rCtx.fillStyle = '#f97316';
+      rCtx.fillRect(184, 0, 8, 1024);
+      rCtx.fillRect(1024 - 192, 0, 8, 1024);
+      rCtx.fillStyle = '#38bdf8';
+      rCtx.fillRect(200, 0, 8, 1024);
+      rCtx.fillRect(1024 - 208, 0, 8, 1024);
+
+      // Center double-amber spine + Luminous Twin White-Cyan Tracking Dashes
       rCtx.fillStyle = '#f97316';
       rCtx.fillRect(centerX - 18, 0, 8, 1024);
       rCtx.fillRect(centerX + 10, 0, 8, 1024);
 
       for (let dy = 18; dy < 1024; dy += 128) {
-        // Twin bright white-cyan dashed light bars flanking the center spine
         rCtx.fillStyle = '#f8fafc';
-        rCtx.fillRect(centerX - 68, dy, 12, 78);
-        rCtx.fillRect(centerX - 48, dy, 12, 78);
-        rCtx.fillRect(centerX + 36, dy, 12, 78);
-        rCtx.fillRect(centerX + 56, dy, 12, 78);
+        rCtx.fillRect(centerX - 68, dy, 10, 72);
+        rCtx.fillRect(centerX + 58, dy, 10, 72);
 
         if (isNeon) {
           eCtx.fillStyle = '#bae6fd';
-          eCtx.fillRect(centerX - 68, dy, 12, 78);
-          eCtx.fillRect(centerX - 48, dy, 12, 78);
-          eCtx.fillRect(centerX + 36, dy, 12, 78);
-          eCtx.fillRect(centerX + 56, dy, 12, 78);
+          eCtx.fillRect(centerX - 68, dy, 10, 72);
+          eCtx.fillRect(centerX + 58, dy, 10, 72);
         }
       }
 
-      drawTripleChevron(rCtx, 336, 220, 112, 34, '#00f2fe');
-      drawTripleChevron(rCtx, 688, 732, 112, 34, '#f8fafc');
-
       if (isNeon) {
-        eCtx.fillStyle = '#00d8ff';
-        eCtx.fillRect(38, 0, 12, 1024);
-        eCtx.fillRect(1024 - 50, 0, 12, 1024);
-        eCtx.fillStyle = '#cbd5e1';
-        eCtx.fillRect(54, 0, 5, 1024);
-        eCtx.fillRect(1024 - 59, 0, 5, 1024);
+        eCtx.fillStyle = '#00e5ff';
+        eCtx.fillRect(56, 0, 10, 1024);
+        eCtx.fillRect(1024 - 66, 0, 10, 1024);
         eCtx.fillStyle = '#ea580c';
-        eCtx.fillRect(184, 0, 9, 1024);
-        eCtx.fillRect(1024 - 193, 0, 9, 1024);
+        eCtx.fillRect(70, 0, 6, 1024);
+        eCtx.fillRect(1024 - 76, 0, 6, 1024);
+        eCtx.fillRect(184, 0, 8, 1024);
+        eCtx.fillRect(1024 - 192, 0, 8, 1024);
         eCtx.fillRect(centerX - 18, 0, 8, 1024);
         eCtx.fillRect(centerX + 10, 0, 8, 1024);
         eCtx.fillStyle = '#0284c7';
-        eCtx.fillRect(200, 0, 9, 1024);
-        eCtx.fillRect(1024 - 209, 0, 9, 1024);
-        drawTripleChevron(eCtx, 336, 220, 112, 34, '#0284c7');
-        drawTripleChevron(eCtx, 688, 732, 112, 34, '#94a3b8');
+        eCtx.fillRect(200, 0, 8, 1024);
+        eCtx.fillRect(1024 - 208, 0, 8, 1024);
       }
 
       eCtx.restore();
       rCtx.restore();
 
+      roadBumpMap.needsUpdate = true;
       roadMap.needsUpdate = true;
       roadEmissiveMap.needsUpdate = true;
       return;
@@ -1336,16 +1473,7 @@ export function createProceduralTextures(
       roadBumpMap.needsUpdate = true;
     }
 
-    if (laneImg) {
-      rCtx.save();
-      rCtx.globalAlpha = 0.90;
-      for (let ty = 0; ty < 2; ty++) {
-        rCtx.drawImage(laneImg, centerX - 96, ty * 512, 88, 512);
-      }
-      rCtx.restore();
-    }
-
-    // Re-reinforce heterogeneous outer curb lines, center spine, and triple-chevron boost arrows cleanly on top
+    // Re-reinforce heterogeneous outer curb lines and center spine cleanly on top
     rCtx.save();
     rCtx.globalAlpha = 1.0;
     const legacyAccent = isCity ? '#fbbf24' : '#00f2fe';
@@ -1357,8 +1485,6 @@ export function createProceduralTextures(
     rCtx.fillRect(1024 - 69, 0, 5, 1024);
     rCtx.fillStyle = legacyAccent;
     rCtx.fillRect(centerX - 4, 0, 8, 1024);
-    drawTripleChevron(rCtx, 258, 210, 136, 38, legacyAccent);
-    drawTripleChevron(rCtx, 766, 690, 136, 38, '#f8fafc');
     rCtx.restore();
 
     roadMap.needsUpdate = true;
@@ -1369,25 +1495,13 @@ export function createProceduralTextures(
       cityWetImg = img;
       compositeRoadOverlays();
     });
-    loadCachedImage('/assets/aistudio/04_lane_marked_asphalt_114cfdbd.png', (img) => {
-      cityLaneImg = img;
-      compositeRoadOverlays();
-    });
     loadCachedImage('/assets/aistudio/08_cyan_corridor_floor_bf8dbc94.png', (img) => {
       cityCorridorImg = img;
-      compositeRoadOverlays();
-    });
-    loadCachedImage('/assets/aistudio/05_magenta_neon_rail_9f9d1ec5.png', (img) => {
-      cityMagentaImg = img;
       compositeRoadOverlays();
     });
   } else {
     loadCachedImage('/assets/aistudio/01_roadway_panels_92956cd2.png', (img) => {
       panelImg = img;
-      compositeRoadOverlays();
-    });
-    loadCachedImage('/assets/aistudio/06_amber_lane_markings_4d07587e.png', (img) => {
-      laneImg = img;
       compositeRoadOverlays();
     });
     loadCachedImage('/assets/aistudio/05_cyan_neon_surface_ff1a6f38.png', (img) => {
@@ -1437,5 +1551,6 @@ export function createProceduralTextures(
     volcanicBasaltEmissiveMap,
     volcanicBasaltLavaMaskMap,
     lavaCloudMap,
+    updateAnimatedTextures,
   };
 }

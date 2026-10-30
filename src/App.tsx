@@ -47,9 +47,9 @@ const INITIAL_TELEMETRY: HudTelemetry = {
   countdownProgress: 0,
   introPhase: 'overview',
   statusBanner: 'STANDBY',
-  weatherLabel: 'NEON RAIN SQUALL',
-  weatherIntensity: 0.65,
-  surfaceGripPct: 73,
+  weatherLabel: 'STORM SUPERCELL // VORTEX',
+  weatherIntensity: 0.91,
+  surfaceGripPct: 62,
   isBoosting: false,
   nitroActive: false,
   boostReady: true,
@@ -59,6 +59,8 @@ const INITIAL_TELEMETRY: HudTelemetry = {
   lastCollectedWeapon: null,
   lastCollectedTimer: 0,
   ringChain: 0,
+  boostComboCount: 0,
+  boostComboTimer: 0,
   shieldActive: false,
   shieldRemainingSec: 0,
   laserActive: false,
@@ -126,11 +128,14 @@ export default function App() {
   const [telemetry, setTelemetry] = useState<HudTelemetry>(INITIAL_TELEMETRY);
   const [raceSummary, setRaceSummary] = useState<RaceSummary | null>(null);
 
+  const mainRef = useRef<HTMLElement | null>(null);
   const actionTriggerRef = useRef({
     boostPulse: false,
     useBonus: false,
     useWeapon: false,
     steerDir: 0,
+    throttleHeld: false,
+    brakeHeld: false,
   });
 
   // Sync document.body.dataset attributes immediately
@@ -140,7 +145,12 @@ export default function App() {
     document.body.dataset.debugMenuOpen = String(debugMenuOpen);
     document.body.dataset.cameraPaused = String(cameraPaused);
     document.body.dataset.demoMode = String(demoMode);
-  }, [gameState, debugMode, debugMenuOpen, cameraPaused, demoMode]);
+    document.body.dataset.cameraMode = settings.cameraMode;
+    if (gameState === 'playing' && !settingsOpen && !debugMenuOpen) {
+      window.focus();
+      mainRef.current?.focus({ preventScroll: true });
+    }
+  }, [gameState, debugMode, debugMenuOpen, cameraPaused, demoMode, settings.cameraMode, settingsOpen]);
 
   // Sync audio engine volume/mute/theme/preset settings
   useEffect(() => {
@@ -293,8 +303,9 @@ export default function App() {
 
   const handleCycleCamera = useCallback(() => {
     setSettings((prev) => {
-      const order: CameraMode[] = ['chase', 'close', 'cockpit'];
-      const next = order[(order.indexOf(prev.cameraMode) + 1) % order.length];
+      const order: CameraMode[] = ['perspective', 'chase', 'close', 'cockpit'];
+      const idx = order.indexOf(prev.cameraMode);
+      const next = order[(idx === -1 ? 0 : idx + 1) % order.length];
       return { ...prev, cameraMode: next };
     });
   }, []);
@@ -365,8 +376,29 @@ export default function App() {
     actionTriggerRef.current.useWeapon = true;
   }, []);
 
+  const handleTriggerThrottle = useCallback((active: boolean) => {
+    actionTriggerRef.current.throttleHeld = active;
+  }, []);
+
+  const handleTriggerBrake = useCallback((active: boolean) => {
+    actionTriggerRef.current.brakeHeld = active;
+  }, []);
+
+  const handleTriggerSteer = useCallback((dir: number) => {
+    actionTriggerRef.current.steerDir = dir;
+  }, []);
+
   return (
-    <main className="relative w-screen h-screen overflow-hidden bg-[#05070d] select-none">
+    <main
+      ref={mainRef}
+      tabIndex={0}
+      onMouseDown={() => {
+        if (!settingsOpen && !debugMenuOpen) {
+          mainRef.current?.focus({ preventScroll: true });
+        }
+      }}
+      className="movement-control-container relative w-screen h-screen overflow-hidden bg-[#05070d] select-none outline-none"
+    >
       {/* Persistent 3D WebGL Anti-Gravity Track & Craft Viewport */}
       <RacingCanvas
         gameState={gameState}
@@ -386,6 +418,7 @@ export default function App() {
         onToggleCameraPause={handleToggleCameraPause}
         onOpenDebugMenu={handleOpenDebugMenu}
         onCycleCamera={handleCycleCamera}
+        onTakeControl={handleTakeControl}
         actionTriggerRef={actionTriggerRef}
       />
 
@@ -417,6 +450,9 @@ export default function App() {
           onTriggerBoost={handleTriggerBoost}
           onTriggerBonus={handleTriggerBonus}
           onTriggerWeapon={handleTriggerWeapon}
+          onTriggerThrottle={handleTriggerThrottle}
+          onTriggerBrake={handleTriggerBrake}
+          onTriggerSteer={handleTriggerSteer}
           onTakeControl={handleTakeControl}
           onExitDemo={handleExitDemo}
         />

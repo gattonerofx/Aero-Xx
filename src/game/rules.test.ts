@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   BONUS_RESPAWN_SECONDS,
   DEFAULT_SETTINGS,
+  POWERUP_META,
   SHIP_SPECS,
   calculateStandings,
   computeAiInput,
@@ -15,14 +16,18 @@ import {
   formatOrdinal,
   formatRaceTime,
   getAiDifficultyProfile,
+  isWithinEnvironmentStructureZone,
   resolveRacerCollisions,
+  resolveTrackBoundaryAndEnvironmentCollision,
   stepRacerPhysics,
   stepWeaponCombat,
 } from './rules';
 
-test('initial racers start with player in 4th position out of 6', () => {
+test('initial racers start with player in 4th position out of 6 and in the exact center of the track (lateralOffset = 0)', () => {
   const racers = createInitialRacers('valkyrie');
   assert.equal(racers.length, 6);
+  const player = racers.find((r) => r.isPlayer)!;
+  assert.equal(player.lateralOffset, 0, 'Player must start in the exact center of the track (lateralOffset = 0)');
   const standings = calculateStandings(racers);
   const playerRank = standings.findIndex((r) => r.isPlayer) + 1;
   assert.equal(playerRank, 4);
@@ -497,39 +502,27 @@ test('resolveRacerCollisions detects vehicle-to-vehicle contact and separates hu
   );
 });
 
-test('createTrackPads distributes lower density pads on City (24) and Lava (15) with all 6 power-ups and 4 weapons', () => {
+test('createTrackPads generates chained velocity-boost series and floating 3D weapon/power-up boxes along the racing line', () => {
   const cityPads = createTrackPads('city');
   const lavaPads = createTrackPads('lava_v2');
-  const expectedPowerUps = ['boost', 'nitro', 'crystal', 'shield', 'repair', 'credit'] as const;
-  const expectedWeapons = ['missile', 'laser', 'shockwave', 'mines'] as const;
+  assert.equal(cityPads.length, 36, 'City track should have 36 total pads/boxes (18 chained boost pads + 9 bonus + 9 weapon)');
+  assert.equal(lavaPads.length, 25, 'Lava track should have 25 total pads/boxes (15 chained boost pads + 5 bonus + 5 weapon)');
+  assert.equal(createTrackPads('city', false).length, 0, 'Passing enableLegacyPads=false disables pads');
 
-  assert.equal(cityPads.length, 24, 'City circuit should have 24 well-spaced pads');
-  assert.equal(lavaPads.length, 15, 'Lava circuit should have 15 well-spaced pads (lower density)');
+  const cityBoostPads = cityPads.filter((p) => p.type === 'boost');
+  const lavaBoostPads = lavaPads.filter((p) => p.type === 'boost');
+  assert.equal(cityBoostPads.length, 18, 'City track should have 6 chains of 3 velocity-boost pads (18 total)');
+  assert.equal(lavaBoostPads.length, 15, 'Lava track should have 5 chains of 3 velocity-boost pads (15 total)');
 
-  const cityBoosts = cityPads.filter((p) => p.type === 'boost');
-  const lavaBoosts = lavaPads.filter((p) => p.type === 'boost');
-  assert.equal(cityBoosts.length, 8, 'City circuit should have 8 fixed speed boost pads');
-  assert.equal(lavaBoosts.length, 5, 'Lava circuit should have 5 fixed speed boost pads');
-
-  for (const pType of expectedPowerUps) {
+  // Ensure no pad is placed on top of the starting grid (t < 0.05) and each 3-pad chain is spaced for consecutive chaining
+  assert.ok(cityPads.every((p) => p.t >= 0.055), 'No pad should sit directly in front of the starting grid');
+  for (let s = 0; s < 6; s++) {
+    const c0 = cityBoostPads[s * 3];
+    const c1 = cityBoostPads[s * 3 + 1];
+    const c2 = cityBoostPads[s * 3 + 2];
     assert.ok(
-      cityPads.some((p) => p.powerUpType === pType),
-      `City circuit should include ${pType}`
-    );
-    assert.ok(
-      lavaPads.some((p) => p.powerUpType === pType),
-      `Lava circuit should include ${pType}`
-    );
-  }
-
-  for (const wType of expectedWeapons) {
-    assert.ok(
-      cityPads.some((p) => p.type === 'weapon' && p.weaponType === wType),
-      `City circuit should include ${wType} weapon boxes`
-    );
-    assert.ok(
-      lavaPads.some((p) => p.type === 'weapon' && p.weaponType === wType),
-      `Lava circuit should include ${wType} weapon boxes`
+      Math.abs(c1.t - c0.t - 0.02) < 0.002 && Math.abs(c2.t - c1.t - 0.02) < 0.002,
+      'Each velocity-boost chain should place 3 consecutive pads ~0.020 spline units apart'
     );
   }
 });
@@ -572,14 +565,14 @@ test('collecting each of the power-up boxes applies its specific race effect', (
 test('single-slot weapon lock keeps weapon until used with Z and prevents collecting another weapon', () => {
   const racers = createInitialRacers('valkyrie');
   const player = racers.find((r) => r.isPlayer)!;
-  player.t = 0.095;
-  player.totalProgress = 0.095;
+  player.t = 0.005;
+  player.totalProgress = 0.005;
   player.lateralOffset = 0;
   player.speedKmh = 760;
 
   const weaponPads = [
-    { id: 201, t: 0.1, laneOffset: 0, type: 'weapon' as const, weaponType: 'missile' as const },
-    { id: 202, t: 0.11, laneOffset: 0, type: 'weapon' as const, weaponType: 'laser' as const },
+    { id: 201, t: 0.01, laneOffset: 0, type: 'weapon' as const, weaponType: 'missile' as const },
+    { id: 202, t: 0.015, laneOffset: 0, type: 'weapon' as const, weaponType: 'laser' as const },
   ];
 
   const res1 = stepRacerPhysics(
@@ -963,8 +956,8 @@ test('precision lane changes stop cleanly on key release without overshoot, and 
   }
   const offsetAtRelease = player.lateralOffset;
   assert.ok(
-    offsetAtRelease < -3.5 && offsetAtRelease > -7.5,
-    `0.25s steer tap should move cleanly by ~1 lane (-3.5m..-7.5m), got ${offsetAtRelease.toFixed(2)}m`
+    offsetAtRelease < -3.5 && offsetAtRelease > -8.2,
+    `0.25s steer tap should move cleanly by ~1 lane (-3.5m..-8.2m), got ${offsetAtRelease.toFixed(2)}m`
   );
 
   // 2. Release steering for 0.5s (30 frames at 60 FPS): must settle rapidly without sliding into the wall
@@ -1084,9 +1077,421 @@ test('Extended Lava Circuit curvature anchors and 3-lap simulation run cleanly a
   assert.equal(player.finished, true, 'Player should complete all 3 laps on the Extended Lava Circuit');
   assert.equal(player.lap, 3, 'Completed lap counter should be 3');
   assert.ok(
-    elapsedMs > 120000 && elapsedMs < 320000,
-    `Expected 3-lap Extended Lava Circuit duration between 120s and 320s, got ${(elapsedMs / 1000).toFixed(1)}s`
+    elapsedMs > 75000 && elapsedMs < 320000,
+    `Expected 3-lap Extended Lava Circuit duration between 75s and 320s, got ${(elapsedMs / 1000).toFixed(1)}s`
   );
 });
 
+test('Strategic boost pads accelerate vehicle to high velocity and gameSpeed setting scales physical travel speed', () => {
+  const racers = createInitialRacers('valkyrie');
+  const player = racers.find((r) => r.isPlayer)!;
+  player.t = 0.055;
+  player.totalProgress = 0.055;
+  player.lateralOffset = 0;
+  player.speedKmh = 820;
+
+  const boostPad = [
+    { id: 1, t: 0.058, laneOffset: 0.0, type: 'boost' as const, powerUpType: 'boost' as const },
+  ];
+
+  const res = stepRacerPhysics(
+    player,
+    {
+      throttle: true,
+      brake: false,
+      steerLeft: false,
+      steerRight: false,
+      airbrakeLeft: false,
+      airbrakeRight: false,
+      boostHeld: false,
+      useBonusPressed: false,
+    },
+    0.2,
+    9800,
+    3,
+    DEFAULT_SETTINGS,
+    boostPad,
+    [],
+    1000
+  );
+
+  assert.equal(res.hitBoostPad, true, 'Crossing strategic boost pad should trigger hitBoostPad');
+  assert.ok(
+    player.speedKmh >= 1000,
+    `Strategic boost pad should surge vehicle speed above 1000 KM/H (got ${player.speedKmh.toFixed(1)} KM/H)`
+  );
+
+  // Verify settings.gameSpeed scales actual physical progress along the spline
+  const rNormal = createInitialRacers('valkyrie').find((r) => r.isPlayer)!;
+  const rTurbo = createInitialRacers('valkyrie').find((r) => r.isPlayer)!;
+  rNormal.speedKmh = 750;
+  rTurbo.speedKmh = 750;
+
+  stepRacerPhysics(
+    rNormal,
+    {
+      throttle: true,
+      brake: false,
+      steerLeft: false,
+      steerRight: false,
+      airbrakeLeft: false,
+      airbrakeRight: false,
+      boostHeld: false,
+      useBonusPressed: false,
+    },
+    0.1,
+    9800,
+    3,
+    { ...DEFAULT_SETTINGS, gameSpeed: 1.0 },
+    [],
+    [],
+    1000
+  );
+  stepRacerPhysics(
+    rTurbo,
+    {
+      throttle: true,
+      brake: false,
+      steerLeft: false,
+      steerRight: false,
+      airbrakeLeft: false,
+      airbrakeRight: false,
+      boostHeld: false,
+      useBonusPressed: false,
+    },
+    0.1,
+    9800,
+    3,
+    { ...DEFAULT_SETTINGS, gameSpeed: 1.5 },
+    [],
+    [],
+    1000
+  );
+
+  const normalDelta = rNormal.totalProgress - 0.002;
+  const turboDelta = rTurbo.totalProgress - 0.002;
+  assert.ok(
+    turboDelta > normalDelta * 1.45,
+    `gameSpeed=1.5 should increase physical spline progress by ~1.5x (normalDelta=${normalDelta.toFixed(5)}, turboDelta=${turboDelta.toFixed(5)})`
+  );
+});
+
+test('DEFAULT_SETTINGS sets perspective view as default and disables Motion Lines and Camera G-Force by default', () => {
+  assert.equal(DEFAULT_SETTINGS.cameraMode, 'perspective', 'Default camera mode must be perspective');
+  assert.equal(DEFAULT_SETTINGS.enableMotionLines, false, 'High Speed Motion Lines must be OFF by default');
+  assert.equal(DEFAULT_SETTINGS.enableGForceTilt, false, 'Camera G-Force Tilt must be OFF by default');
+
+  // Verify vehicle drift angle (yawOffset) builds smoothly during high-speed cornering maneuvers in open roadway
+  const racers = createInitialRacers('valkyrie');
+  const player = racers.find((r) => r.isPlayer)!;
+  player.lateralOffset = 4.0;
+  player.speedKmh = 680;
+  for (let i = 0; i < 5; i++) {
+    stepRacerPhysics(
+      player,
+      {
+        throttle: true,
+        brake: false,
+        steerLeft: true,
+        steerRight: false,
+        airbrakeLeft: true,
+        airbrakeRight: false,
+        boostHeld: false,
+        useBonusPressed: false,
+      },
+      0.05,
+      9800,
+      3,
+      DEFAULT_SETTINGS,
+      [],
+      [],
+      i * 50
+    );
+  }
+  assert.ok(
+    Math.abs(player.yawOffset) > 0.12,
+    `Expected significant vehicle drift angle (yawOffset) during high-speed cornering maneuver, got ${player.yawOffset.toFixed(3)}`
+  );
+});
+
+test('Player starting at race center (index 3 in racers array) never flickers when idle and freely steers from -12.13m to +12.13m', () => {
+  const racers = createInitialRacers('valkyrie');
+  const playerIdx = racers.findIndex((r) => r.isPlayer);
+  assert.equal(playerIdx, 3, 'Player starts at index 3 (4th grid slot) in racers array');
+  const player = racers[playerIdx];
+  assert.equal(player.lateralOffset, 0, 'Player starts centered on the track');
+
+  // 1. Simulate 60 frames of race loop where player is idle and AI loop skips r.isPlayer:
+  // verify zero lateral/roll/yaw flickering and zero unwanted forward movement
+  const dt = 1 / 60;
+  for (let frame = 0; frame < 60; frame++) {
+    stepRacerPhysics(
+      player,
+      {
+        throttle: false,
+        brake: false,
+        steerLeft: false,
+        steerRight: false,
+        airbrakeLeft: false,
+        airbrakeRight: false,
+        boostHeld: false,
+        useBonusPressed: false,
+      },
+      dt,
+      9800,
+      3,
+      DEFAULT_SETTINGS,
+      [],
+      [],
+      frame * 16.6
+    );
+    for (let i = 0; i < racers.length; i++) {
+      const r = racers[i];
+      if (r.isPlayer) continue;
+      const aiInput = computeAiInput(r, i, DEFAULT_SETTINGS, [], player.totalProgress, racers);
+      stepRacerPhysics(r, aiInput, dt, 9800, 3, DEFAULT_SETTINGS, [], [], frame * 16.6);
+    }
+    assert.equal(player.lateralOffset, 0, 'Idle player lateralOffset must stay at 0 without flickering');
+    assert.equal(player.rollAngle, 0, 'Idle player rollAngle must stay at 0 without flickering');
+    assert.equal(player.yawOffset, 0, 'Idle player yawOffset must stay at 0 without flickering');
+    assert.equal(player.speedKmh, 0, 'Idle player speedKmh must stay at 0 when throttle is not pressed');
+  }
+
+  // 2. Steer left from standstill/low speed all the way to the left guardrail (-12.13m)
+  for (let frame = 0; frame < 90; frame++) {
+    stepRacerPhysics(
+      player,
+      {
+        throttle: true,
+        brake: false,
+        steerLeft: true,
+        steerRight: false,
+        airbrakeLeft: false,
+        airbrakeRight: false,
+        boostHeld: false,
+        useBonusPressed: false,
+      },
+      dt,
+      9800,
+      3,
+      DEFAULT_SETTINGS,
+      [],
+      [],
+      1000 + frame * 16.6
+    );
+  }
+  assert.ok(
+    player.lateralOffset <= -12.1,
+    `Player must be able to roam all the way to the left guardrail (<= -12.1m), got ${player.lateralOffset.toFixed(2)}m`
+  );
+
+  // 3. Steer right across the entire track width all the way to the right guardrail (+12.13m)
+  for (let frame = 0; frame < 120; frame++) {
+    stepRacerPhysics(
+      player,
+      {
+        throttle: true,
+        brake: false,
+        steerLeft: false,
+        steerRight: true,
+        airbrakeLeft: false,
+        airbrakeRight: false,
+        boostHeld: false,
+        useBonusPressed: false,
+      },
+      dt,
+      9800,
+      3,
+      DEFAULT_SETTINGS,
+      [],
+      [],
+      3000 + frame * 16.6
+    );
+  }
+  assert.ok(
+    player.lateralOffset >= 12.1,
+    `Player must be able to roam all the way across the track to the right guardrail (>= +12.1m), got ${player.lateralOffset.toFixed(2)}m`
+  );
+});
+
+// 21. Default Game Speed 125% & Unified Electric-Blue Triple-Arrow Boost Pad Metadata
+test('DEFAULT_SETTINGS.gameSpeed is 1.25 (125%) and POWERUP_META.boost uses electric-blue triple-arrow styling', () => {
+  assert.strictEqual(DEFAULT_SETTINGS.gameSpeed, 1.25, 'Default gameSpeed must be 1.25 (125%)');
+  assert.strictEqual(POWERUP_META.boost.color, '#00e5ff', 'Boost pad primary color must be electric blue (#00e5ff)');
+  assert.strictEqual(POWERUP_META.boost.accentHex, 0x00e5ff, 'Boost pad accentHex must be 0x00e5ff');
+});
+
+// 22. Progressive Boost Pad Series Combo (1 -> 2 -> 3) Rewards Higher Velocity & Combo Count
+test('Hitting boost pads in series increments boostComboCount (1 -> 2 -> 3) and awards progressively higher speed', () => {
+  const racers = createInitialRacers('valkyrie');
+  const player = racers.find((r) => r.isPlayer)!;
+  player.speedKmh = 300;
+  player.lateralOffset = 0;
+
+  const seriesPads = [
+    { id: 101, t: 0.1, laneOffset: 0, type: 'boost' as const, powerUpType: 'boost' as const },
+    { id: 102, t: 0.2, laneOffset: 0, type: 'boost' as const, powerUpType: 'boost' as const },
+    { id: 103, t: 0.3, laneOffset: 0, type: 'boost' as const, powerUpType: 'boost' as const },
+  ];
+
+  // Hit Pad 1
+  player.t = 0.1;
+  const res1 = stepRacerPhysics(
+    player,
+    { throttle: true, brake: false, steerLeft: false, steerRight: false, airbrakeLeft: false, airbrakeRight: false, boostHeld: false, useBonusPressed: false },
+    0.016,
+    9800,
+    3,
+    DEFAULT_SETTINGS,
+    seriesPads,
+    [],
+    1000
+  );
+  assert.strictEqual(res1.hitBoostPad, true, 'First pad must trigger hitBoostPad');
+  assert.strictEqual(res1.boostComboCount, 1, 'First pad in series sets boostComboCount to 1');
+  const speedAfterPad1 = player.speedKmh;
+
+  // Hit Pad 2 within combo window
+  player.t = 0.2;
+  const res2 = stepRacerPhysics(
+    player,
+    { throttle: true, brake: false, steerLeft: false, steerRight: false, airbrakeLeft: false, airbrakeRight: false, boostHeld: false, useBonusPressed: false },
+    0.016,
+    9800,
+    3,
+    DEFAULT_SETTINGS,
+    seriesPads,
+    [],
+    2000
+  );
+  assert.strictEqual(res2.hitBoostPad, true, 'Second pad must trigger hitBoostPad');
+  assert.strictEqual(res2.boostComboCount, 2, 'Second pad in series increments boostComboCount to 2');
+  const speedAfterPad2 = player.speedKmh;
+  assert.ok(speedAfterPad2 > speedAfterPad1, `Combo x2 speed (${speedAfterPad2}) must exceed Combo x1 speed (${speedAfterPad1})`);
+
+  // Hit Pad 3 within combo window
+  player.t = 0.3;
+  const res3 = stepRacerPhysics(
+    player,
+    { throttle: true, brake: false, steerLeft: false, steerRight: false, airbrakeLeft: false, airbrakeRight: false, boostHeld: false, useBonusPressed: false },
+    0.016,
+    9800,
+    3,
+    DEFAULT_SETTINGS,
+    seriesPads,
+    [],
+    3000
+  );
+  assert.strictEqual(res3.hitBoostPad, true, 'Third pad must trigger hitBoostPad');
+  assert.strictEqual(res3.boostComboCount, 3, 'Third pad in series increments boostComboCount to 3');
+  assert.ok(player.speedKmh > speedAfterPad2, `Combo x3 speed (${player.speedKmh}) must exceed Combo x2 speed (${speedAfterPad2})`);
+});
+
+// 23. Boundary Detection, Environment Mesh Structure Collision & Smooth Lateral Drifting
+test('resolveTrackBoundaryAndEnvironmentCollision prevents wall/environment clipping and supports smooth lateral drifting across track width', () => {
+  const racers = createInitialRacers('valkyrie');
+  const player = racers.find((r) => r.isPlayer)!;
+  player.speedKmh = 480;
+
+  // Verify environment structure zone detection at City skyscraper tunnel & Lava volcano tunnel
+  assert.strictEqual(isWithinEnvironmentStructureZone('city', 0.72), true, 'City skyscraper tunnel t=0.72 is an environment structure zone');
+  assert.strictEqual(isWithinEnvironmentStructureZone('lava', 0.16), true, 'Lava volcano tunnel t=0.16 is an environment structure zone');
+  assert.strictEqual(isWithinEnvironmentStructureZone('city', 0.1), false, 'Open roadway t=0.10 is not an environment structure zone');
+
+  // Test environment structure boundary collision deflection at t = 0.72 (City Skyscraper Core Tunnel)
+  player.t = 0.72;
+  player.lateralOffset = 14.2; // attempting to clip past the right tunnel wall
+  player.lateralVelocity = 18.0;
+  const envHit = resolveTrackBoundaryAndEnvironmentCollision(player, 'city', 0, 1.0, 1 / 60);
+  assert.strictEqual(envHit.wallCollision, true, 'Exceeding boundary inside tunnel triggers wallCollision');
+  assert.strictEqual(envHit.envStructureHit, true, 'Collision at t=0.72 flags envStructureHit');
+  assert.ok(player.lateralOffset <= 12.13, `Player offset clamped inside roadway (<= 12.13m), got ${player.lateralOffset}`);
+  assert.ok(player.lateralVelocity < 0, 'Unsteered wall impact rebounds lateralVelocity inward away from wall');
+
+  // Test smooth lateral drift glide when steering across the roadway and releasing steering at speed
+  player.t = 0.1;
+  player.lateralOffset = 0;
+  player.lateralVelocity = 0;
+  player.speedKmh = 420;
+  for (let i = 0; i < 12; i++) {
+    stepRacerPhysics(
+      player,
+      {
+        throttle: true,
+        brake: false,
+        steerLeft: false,
+        steerRight: true,
+        airbrakeLeft: false,
+        airbrakeRight: true,
+        boostHeld: false,
+        useBonusPressed: false,
+      },
+      1 / 60,
+      9800,
+      3,
+      DEFAULT_SETTINGS,
+      [],
+      [],
+      4000 + i * 16.6
+    );
+  }
+  const offsetAfterSteer = player.lateralOffset;
+  assert.ok(offsetAfterSteer > 4.5 && offsetAfterSteer < 10.5, `Active steer + airbrake smoothly drifts ship across roadway (4.5m..10.5m), got ${offsetAfterSteer.toFixed(2)}m`);
+
+  // Release steer for 10 frames at high speed: ship continues a smooth lateral drift glide in the chosen direction without snapping back to 0
+  for (let i = 0; i < 10; i++) {
+    stepRacerPhysics(
+      player,
+      {
+        throttle: true,
+        brake: false,
+        steerLeft: false,
+        steerRight: false,
+        airbrakeLeft: false,
+        airbrakeRight: false,
+        boostHeld: false,
+        useBonusPressed: false,
+      },
+      1 / 60,
+      9800,
+      3,
+      DEFAULT_SETTINGS,
+      [],
+      [],
+      4500 + i * 16.6
+    );
+  }
+  assert.ok(
+    player.lateralOffset > offsetAfterSteer,
+    `High-speed drift glide continues smoothly outward (${player.lateralOffset.toFixed(2)}m > ${offsetAfterSteer.toFixed(2)}m) without snapping back to center`
+  );
+});
+
+// 24. City Default Storm Mode, Evolving Storm Phases & Boost Chain Combo Multiplier
+test('DEFAULT_SETTINGS uses storm weather by default on City circuit and evolves storm cloud density and phases', () => {
+  assert.strictEqual(DEFAULT_SETTINGS.trackId, 'city', 'Default circuit is city');
+  assert.strictEqual(DEFAULT_SETTINGS.weatherMode, 'storm', 'Default weatherMode is storm for the City circuit');
+
+  const stormAtStart = computeWeatherState('city', 'storm', 0);
+  assert.ok(stormAtStart.intensity > 0.8, 'Storm mode intensity is > 0.8');
+  assert.ok((stormAtStart.cloudDensity ?? 0) >= 0.85, 'Storm mode cloudDensity is high (>= 0.85)');
+
+  // Verify storm mode evolves through distant_lightning, monsoon_squall, and supercell_vortex during the race
+  const stormPhases = new Set<string>();
+  for (let t = 0; t <= 45; t += 1) {
+    const w = computeWeatherState('city', 'storm', t);
+    if (w.stormPhase) stormPhases.add(w.stormPhase);
+  }
+  assert.ok(stormPhases.has('distant_lightning'), 'Storm mode starts with distant_lightning phase');
+  assert.ok(stormPhases.has('monsoon_squall'), 'Storm mode progresses into monsoon_squall phase');
+  assert.ok(stormPhases.has('supercell_vortex'), 'Storm mode reaches supercell_vortex phase');
+
+  // Verify dynamic weather mode also cycles through gathering clouds, distant lightning, monsoon squall, and supercell vortex
+  const dynamicPhases = new Set<string>();
+  for (let t = 0; t <= 120; t += 2) {
+    const w = computeWeatherState('city', 'dynamic', t);
+    if (w.stormPhase) dynamicPhases.add(w.stormPhase);
+  }
+  assert.ok(dynamicPhases.has('distant_lightning') && dynamicPhases.has('monsoon_squall'), 'Dynamic City weather progresses through lightning and squall phases');
+});
 

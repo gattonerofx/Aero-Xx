@@ -246,7 +246,7 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
                       <span aria-hidden="true">·</span>
                       <span>{tSpec.totalLaps}L</span>
                       <span aria-hidden="true">·</span>
-                      <span className="text-cyan-300">6 Power Boxes</span>
+                      <span className="text-cyan-300">Strategic Boosts &amp; Weapons</span>
                     </div>
                   </div>
                 </button>

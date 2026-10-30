@@ -294,13 +294,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           {/* Camera Perspective */}
           <div className="space-y-1">
             <label className="block font-semibold text-slate-300">
-              Camera Rig Mode
+              Camera Rig Mode (Default: Perspective)
             </label>
-            <div className="grid grid-cols-3 gap-1 p-1 rounded-lg bg-slate-900 border border-white/10">
-              {(['chase', 'close', 'cockpit'] as CameraMode[]).map((cam) => (
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-1 p-1 rounded-lg bg-slate-900 border border-white/10">
+              {(['perspective', 'chase', 'close', 'cockpit'] as CameraMode[]).map((cam) => (
                 <button
                   key={cam}
                   type="button"
+                  data-testid={`settings-cam-${cam}`}
                   onClick={() => onUpdateSettings({ cameraMode: cam })}
                   className={`py-1.5 px-2 rounded font-semibold capitalize transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
                     settings.cameraMode === cam
@@ -417,6 +418,56 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               }
               className="w-full accent-cyan-400 cursor-pointer"
             />
+          </div>
+
+          {/* Overall Game Speed Slider & Quick Presets */}
+          <div className="space-y-1.5 p-2.5 rounded-xl border border-cyan-400/25 bg-slate-900/65">
+            <div className="flex justify-between items-center">
+              <label htmlFor="game-speed-slider" className="font-semibold text-cyan-200">
+                Overall Game Speed (Velocity Multiplier)
+              </label>
+              <span className="font-mono font-bold text-cyan-300 tabular-nums">
+                {Math.round((settings.gameSpeed ?? 1.25) * 100)}%
+              </span>
+            </div>
+            <input
+              id="game-speed-slider"
+              data-testid="game-speed-slider"
+              type="range"
+              min={0.6}
+              max={2.0}
+              step={0.05}
+              value={settings.gameSpeed ?? 1.25}
+              onChange={(e) =>
+                onUpdateSettings({ gameSpeed: Number(e.target.value) })
+              }
+              className="w-full accent-cyan-400 cursor-pointer"
+            />
+            <div className="flex items-center justify-between gap-1 pt-0.5">
+              {[
+                { label: '80%', val: 0.8 },
+                { label: '100%', val: 1.0 },
+                { label: '125% DEFAULT', val: 1.25 },
+                { label: '150% TURBO', val: 1.5 },
+                { label: '200% HYPER', val: 2.0 },
+              ].map((preset) => {
+                const isSelected = Math.abs((settings.gameSpeed ?? 1.25) - preset.val) < 0.02;
+                return (
+                  <button
+                    key={preset.label}
+                    type="button"
+                    onClick={() => onUpdateSettings({ gameSpeed: preset.val })}
+                    className={`flex-1 py-1 px-1 rounded text-[9px] font-mono font-bold transition-all cursor-pointer border ${
+                      isSelected
+                        ? 'bg-cyan-500/30 border-cyan-300 text-cyan-100'
+                        : 'bg-slate-950/70 border-white/10 text-slate-400 hover:text-slate-200 hover:border-cyan-400/40'
+                    }`}
+                  >
+                    {preset.label}
+                  </button>
+                );
+              })}
+            </div>
           </div>
 
           {/* Separate Background Music Volume Slider */}

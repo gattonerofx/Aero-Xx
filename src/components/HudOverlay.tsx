@@ -17,6 +17,67 @@ export const PowerUpSpriteIcon: React.FC<{
   sizeClass?: string;
 }> = ({ type, sizeClass = 'w-10 h-10' }) => {
   const meta = POWERUP_META[type];
+  if (type === 'boost') {
+    return (
+      <div
+        className={`relative rounded-lg overflow-hidden shrink-0 border flex items-center justify-center bg-slate-950 ${sizeClass}`}
+        style={{
+          borderColor: '#00e5ff',
+          boxShadow: '0 0 14px rgba(0, 229, 255, 0.65), inset 0 0 8px rgba(0, 72, 255, 0.45)',
+        }}
+        title={meta.label}
+      >
+        <svg viewBox="0 0 64 64" className="w-4/5 h-4/5">
+          {/* Top electric-blue closed-loop chevron */}
+          <path
+            d="M32 5 L55 21 L55 31 L32 15 L9 31 L9 21 Z"
+            fill="#00d8ff"
+            stroke="#0048ff"
+            strokeWidth="2.5"
+            strokeLinejoin="round"
+          />
+          <path
+            d="M32 5 L55 21 L55 31 L32 15 L9 31 L9 21 Z"
+            fill="none"
+            stroke="#ffffff"
+            strokeWidth="1.1"
+            strokeLinejoin="round"
+          />
+          {/* Middle electric-blue closed-loop chevron */}
+          <path
+            d="M32 21 L55 37 L55 47 L32 31 L9 47 L9 37 Z"
+            fill="#00bfff"
+            stroke="#0048ff"
+            strokeWidth="2.5"
+            strokeLinejoin="round"
+          />
+          <path
+            d="M32 21 L55 37 L55 47 L32 31 L9 47 L9 37 Z"
+            fill="none"
+            stroke="#ffffff"
+            strokeWidth="1.1"
+            strokeLinejoin="round"
+          />
+          {/* Bottom electric-blue closed-loop chevron */}
+          <path
+            d="M32 37 L55 53 L55 62 L32 46 L9 62 L9 53 Z"
+            fill="#0095ff"
+            stroke="#0048ff"
+            strokeWidth="2.5"
+            strokeLinejoin="round"
+          />
+          <path
+            d="M32 37 L55 53 L55 62 L32 46 L9 62 L9 53 Z"
+            fill="none"
+            stroke="#ffffff"
+            strokeWidth="1.1"
+            strokeLinejoin="round"
+          />
+        </svg>
+      </div>
+    );
+  }
+
   const bgPosX = meta.spriteCol === 0 ? '5%' : meta.spriteCol === 1 ? '50%' : '95%';
   const bgPosY = meta.spriteRow === 0 ? '8%' : '88%';
 
@@ -96,6 +157,9 @@ interface HudOverlayProps {
   onTriggerBoost: (active: boolean) => void;
   onTriggerBonus: () => void;
   onTriggerWeapon?: () => void;
+  onTriggerThrottle?: (active: boolean) => void;
+  onTriggerBrake?: (active: boolean) => void;
+  onTriggerSteer?: (dir: number) => void;
   onTakeControl: () => void;
   onExitDemo: () => void;
 }
@@ -112,6 +176,9 @@ export const HudOverlay: React.FC<HudOverlayProps> = ({
   onTriggerBoost,
   onTriggerBonus,
   onTriggerWeapon,
+  onTriggerThrottle,
+  onTriggerBrake,
+  onTriggerSteer,
   onTakeControl,
   onExitDemo,
 }) => {
@@ -205,10 +272,30 @@ export const HudOverlay: React.FC<HudOverlayProps> = ({
 
   const energySegments = 12;
   const filledSegments = Math.round((telemetry.energy / 100) * energySegments);
-  const bonusInfo = BONUS_META[telemetry.heldBonus];
+  const bonusMeta = BONUS_META[telemetry.heldBonus];
+  const hasBonus = telemetry.heldBonus !== 'none';
+  const heldPowerUpType: PowerUpItemType | null =
+    telemetry.heldBonus === 'hyper_turbine' || telemetry.heldBonus === 'boost'
+      ? 'boost'
+      : telemetry.heldBonus === 'plasma_shield' || telemetry.heldBonus === 'shield'
+      ? 'shield'
+      : telemetry.heldBonus === 'repair'
+      ? 'repair'
+      : telemetry.heldBonus === 'nitro'
+      ? 'nitro'
+      : telemetry.heldBonus === 'crystal'
+      ? 'crystal'
+      : telemetry.heldBonus === 'credit'
+      ? 'credit'
+      : null;
+  const hasWeapon = telemetry.heldWeapon !== 'none';
+  const weaponMeta =
+    telemetry.heldWeapon !== 'none' ? WEAPON_META[telemetry.heldWeapon] : null;
 
   const cameraLabel =
-    settings.cameraMode === 'chase'
+    settings.cameraMode === 'perspective'
+      ? 'Perspective'
+      : settings.cameraMode === 'chase'
       ? 'Chase'
       : settings.cameraMode === 'close'
       ? 'Close'
@@ -240,47 +327,118 @@ export const HudOverlay: React.FC<HudOverlayProps> = ({
         {(telemetry.introPhase === 'overview' || telemetry.introPhase === 'lock') && (
           <div className="mt-1 px-2.5 py-0.5 rounded bg-slate-950/70 text-[9px] md:text-[10px] font-mono tracking-[0.2em] text-cyan-200/85 uppercase whitespace-nowrap">
             {telemetry.introPhase === 'overview'
-              ? 'PANORAMIC SECTOR RECON // [SHIFT] TO SKIP'
-              : 'TURBINE LOCK SEQUENCE // PREPARING COUNTDOWN'}
+              ? 'STORM FRONT RECON // [SHIFT] TO SKIP'
+              : 'SUPERCELL VORTEX LOCK // PREPARING COUNTDOWN'}
+          </div>
+        )}
+
+        {/* VISUAL BOOST CHAIN COMBO MULTIPLIER CALLOUT (Displays when hitting consecutive boost pads) */}
+        {(telemetry.boostComboCount ?? 0) > 0 && (
+          <div
+            data-testid="hud-boost-chain-banner"
+            className="mt-1.5 flex flex-col items-center px-3 py-1 rounded-lg border border-cyan-400/65 backdrop-blur-[3px]"
+            style={{
+              background:
+                'linear-gradient(135deg, rgba(0, 32, 84, 0.72) 0%, rgba(6, 12, 28, 0.62) 100%)',
+              boxShadow:
+                '0 0 18px rgba(0, 229, 255, 0.42), inset 0 1px 0 rgba(255, 255, 255, 0.28)',
+            }}
+          >
+            <div className="flex items-center gap-2">
+              {/* 3 Progressive Electric-Blue Chevrons that light up with the chain level */}
+              <div className="flex items-center -space-x-1">
+                {[1, 2, 3].map((idx) => {
+                  const active = (telemetry.boostComboCount ?? 0) >= idx;
+                  return (
+                    <svg
+                      key={idx}
+                      viewBox="0 0 24 24"
+                      className={`w-3.5 h-3.5 transition-transform duration-150 ${
+                        active ? 'scale-110' : 'opacity-35'
+                      }`}
+                    >
+                      <path
+                        d="M6 4 L16 12 L6 20 L10 20 L20 12 L10 4 Z"
+                        fill={active ? '#00e5ff' : '#1e293b'}
+                        stroke={active ? '#ffffff' : '#0048ff'}
+                        strokeWidth="1.4"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
+                  );
+                })}
+              </div>
+
+              <span className="text-[10px] md:text-[11px] font-bold tracking-[0.18em] text-cyan-100 uppercase">
+                BOOST CHAIN
+              </span>
+
+              <span
+                data-testid="hud-boost-chain-multiplier"
+                className="text-sm md:text-base font-black tabular-nums tracking-tight text-white px-1.5 py-0.2 rounded bg-cyan-500/30 border border-cyan-300/70"
+                style={{
+                  fontFamily: "'Orbitron', sans-serif",
+                  textShadow: '0 0 12px rgba(0, 229, 255, 0.95)',
+                }}
+              >
+                x{telemetry.boostComboCount}
+              </span>
+
+              <span className="text-[9.5px] font-mono font-bold text-cyan-300 tabular-nums">
+                +{235 + ((telemetry.boostComboCount ?? 1) - 1) * 45} KM/H
+              </span>
+            </div>
+
+            {/* Combo Chain Decay Timer Bar (6.5s chain window) */}
+            <div className="w-full h-1 mt-1 rounded-full bg-slate-900/80 overflow-hidden border border-cyan-400/30">
+              <div
+                className="h-full transition-all duration-75 rounded-full"
+                style={{
+                  width: `${Math.min(100, Math.max(0, ((telemetry.boostComboTimer ?? 0) / 6.5) * 100))}%`,
+                  background: 'linear-gradient(90deg, #0048ff 0%, #00e5ff 65%, #ffffff 100%)',
+                  boxShadow: '0 0 8px rgba(0, 229, 255, 0.9)',
+                }}
+              />
+            </div>
           </div>
         )}
       </div>
 
       {/* TOP BAR: Compact Left Race Telemetry & Retractable Right Controls */}
       <div className="flex items-start justify-between w-full">
-        {/* COMPACT TOP-LEFT CLUSTER: Position, Lap Timer & Grip */}
+        {/* COMPACT TOP-LEFT CLUSTER: Position, Lap Timer & Grip (Reduced size & higher transparency) */}
         <div
-          className="flex flex-col gap-1.5 px-3 py-2 rounded-lg border border-cyan-400/25 w-[176px] md:w-[192px]"
+          className="flex flex-col gap-1 px-2 py-1.5 rounded-lg border border-cyan-400/20 w-[138px] md:w-[150px] backdrop-blur-[2px]"
           style={{
             background:
-              'linear-gradient(135deg, rgba(6, 12, 26, 0.82) 0%, rgba(6, 12, 26, 0.44) 100%)',
-            boxShadow: 'inset 0 1px 0 rgba(0, 242, 254, 0.2), 0 6px 18px rgba(0, 0, 0, 0.5)',
+              'linear-gradient(135deg, rgba(6, 12, 26, 0.36) 0%, rgba(6, 12, 26, 0.20) 100%)',
+            boxShadow: 'inset 0 1px 0 rgba(0, 242, 254, 0.14), 0 4px 12px rgba(0, 0, 0, 0.28)',
           }}
         >
           {/* Row 1: Position + Lap side-by-side */}
           <div className="flex items-baseline justify-between leading-none">
-            <div className="flex items-baseline gap-1">
+            <div className="flex items-baseline gap-0.5">
               <div
                 className="flex items-baseline gap-0.5 text-cyan-300"
                 style={{
                   fontFamily: "'Orbitron', sans-serif",
-                  textShadow: '0 0 14px rgba(0, 242, 254, 0.7), 0 1px 4px rgba(0,0,0,0.95)',
+                  textShadow: '0 0 10px rgba(0, 242, 254, 0.6), 0 1px 3px rgba(0,0,0,0.85)',
                 }}
               >
-                <span className="text-2xl md:text-3xl font-black tabular-nums tracking-tight text-white">
+                <span className="text-lg md:text-xl font-black tabular-nums tracking-tight text-white">
                   {rankNum}
                 </span>
-                <span className="text-xs font-bold text-cyan-300">{rankSuffix}</span>
+                <span className="text-[9px] font-bold text-cyan-300">{rankSuffix}</span>
               </div>
-              <span className="text-[9px] font-semibold tracking-wider text-cyan-100/70">
+              <span className="text-[7.5px] font-semibold tracking-wider text-cyan-100/70">
                 /{telemetry.totalRacers}
               </span>
             </div>
 
-            <div className="text-[10px] font-semibold tracking-[0.14em] text-slate-300">
+            <div className="text-[8px] font-semibold tracking-[0.12em] text-slate-300">
               LAP{' '}
               <span
-                className="text-sm font-bold text-white tabular-nums"
+                className="text-[11px] font-bold text-white tabular-nums"
                 style={{ fontFamily: "'Orbitron', sans-serif" }}
               >
                 {telemetry.lap}
@@ -289,26 +447,26 @@ export const HudOverlay: React.FC<HudOverlayProps> = ({
             </div>
           </div>
 
-          <div className="h-[1px] w-full bg-gradient-to-r from-cyan-400/35 via-pink-400/25 to-transparent" />
+          <div className="h-[1px] w-full bg-gradient-to-r from-cyan-400/25 via-pink-400/15 to-transparent" />
 
           {/* Row 2: Compact Lap Time & Best Lap */}
           <div className="flex items-baseline justify-between leading-none">
             <div
-              className="text-base md:text-lg font-bold text-white tabular-nums tracking-wider"
+              className="text-xs md:text-sm font-bold text-white tabular-nums tracking-wider"
               style={{
                 fontFamily: "'JetBrains Mono', monospace",
-                textShadow: '0 0 10px rgba(56, 189, 248, 0.4)',
+                textShadow: '0 0 8px rgba(56, 189, 248, 0.35)',
               }}
             >
               {formatRaceTime(telemetry.currentLapTimeMs)}
             </div>
-            <div className="text-[9px] font-mono tracking-wider text-cyan-200/70 tabular-nums">
+            <div className="text-[7.5px] font-mono tracking-wider text-cyan-200/70 tabular-nums">
               BEST {formatRaceTime(telemetry.bestLapTimeMs)}
             </div>
           </div>
 
           {/* Row 3: Weather & Grip + Compact Ring Overcharge badge */}
-          <div className="flex items-center justify-between gap-1.5 text-[9px] font-mono tracking-wider pt-0.5 border-t border-white/10">
+          <div className="flex items-center justify-between gap-1 text-[7.5px] font-mono tracking-wider pt-0.5 border-t border-white/10">
             <span
               data-testid="hud-weather-label"
               className="font-bold text-cyan-200/90 uppercase truncate"
@@ -319,8 +477,8 @@ export const HudOverlay: React.FC<HudOverlayProps> = ({
               data-testid="hud-grip-value"
               className={`font-bold tabular-nums px-1 py-0.2 rounded border shrink-0 ${
                 telemetry.surfaceGripPct < 75
-                  ? 'border-amber-400/50 text-amber-300 bg-amber-950/60'
-                  : 'border-cyan-400/40 text-cyan-200 bg-cyan-950/50'
+                  ? 'border-amber-400/40 text-amber-300 bg-amber-950/35'
+                  : 'border-cyan-400/30 text-cyan-200 bg-cyan-950/30'
               }`}
             >
               GRIP {telemetry.surfaceGripPct}%
@@ -328,21 +486,21 @@ export const HudOverlay: React.FC<HudOverlayProps> = ({
           </div>
 
           {/* Row 4: Gold Credits (Credit Bonus) & Crystal Bonus Score / Upgrade Lv */}
-          <div className="flex items-center justify-between gap-1.5 pt-1 border-t border-white/10 text-[9px] font-mono">
+          <div className="flex items-center justify-between gap-1 pt-0.5 border-t border-white/10 text-[7.5px] font-mono">
             <div
               data-testid="hud-credits-counter"
-              className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-950/65 border border-amber-400/45 text-amber-300 font-bold"
+              className="flex items-center gap-1 px-1 py-0.5 rounded bg-amber-950/35 border border-amber-400/35 text-amber-300 font-bold"
               title="Credits earned from Gold Credit Bonus tokens"
             >
-              <span className="w-2 h-2 rounded-full bg-amber-400 inline-block" />
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-400 inline-block" />
               <span>CR {telemetry.totalCredits + telemetry.creditsEarned}</span>
             </div>
             <div
               data-testid="hud-crystal-counter"
-              className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-fuchsia-950/65 border border-fuchsia-400/45 text-fuchsia-200 font-bold"
+              className="flex items-center gap-1 px-1 py-0.5 rounded bg-fuchsia-950/35 border border-fuchsia-400/35 text-fuchsia-200 font-bold"
               title="Crystal Bonus points & active vehicle upgrade level"
             >
-              <span className="w-2 h-2 rotate-45 bg-fuchsia-400 inline-block" />
+              <span className="w-1.5 h-1.5 rotate-45 bg-fuchsia-400 inline-block" />
               <span>
                 {telemetry.crystalPoints} PT
                 {telemetry.crystalUpgradeLevel > 0 ? ` · LV${telemetry.crystalUpgradeLevel}` : ''}
@@ -350,15 +508,28 @@ export const HudOverlay: React.FC<HudOverlayProps> = ({
             </div>
           </div>
 
+          {(telemetry.boostComboCount ?? 0) > 0 && (
+            <div
+              data-testid="hud-boost-chain-compact"
+              className="flex items-center justify-between px-1.5 py-0.5 rounded border border-cyan-400/55 bg-blue-950/55 text-[7.5px] font-bold tracking-wider text-cyan-100"
+              style={{ boxShadow: '0 0 10px rgba(0, 229, 255, 0.28)' }}
+            >
+              <span>BOOST CHAIN x{telemetry.boostComboCount}</span>
+              <span className="text-cyan-300 tabular-nums">
+                +{235 + ((telemetry.boostComboCount ?? 1) - 1) * 45} KM/H
+              </span>
+            </div>
+          )}
+
           {telemetry.ringChain > 0 && (
-            <div className="flex items-center justify-between px-2 py-0.5 rounded border border-cyan-400/50 bg-cyan-950/75 text-[9px] font-bold tracking-wider text-cyan-200">
+            <div className="flex items-center justify-between px-1.5 py-0.5 rounded border border-cyan-400/40 bg-cyan-950/40 text-[7.5px] font-bold tracking-wider text-cyan-200">
               <span>OVERCHARGE x{telemetry.ringChain}</span>
               <span className="text-cyan-300">+{telemetry.ringChain * 28} KM/H</span>
             </div>
           )}
 
           {telemetry.shieldActive && (
-            <div className="flex items-center justify-between px-2 py-0.5 rounded border border-indigo-400/60 bg-indigo-950/80 text-[9px] font-bold tracking-wider text-indigo-200">
+            <div className="flex items-center justify-between px-1.5 py-0.5 rounded border border-indigo-400/45 bg-indigo-950/40 text-[7.5px] font-bold tracking-wider text-indigo-200">
               <span>HEX SHIELD GRID</span>
               <span className="text-indigo-300 tabular-nums">{telemetry.shieldRemainingSec}s</span>
             </div>
@@ -462,8 +633,8 @@ export const HudOverlay: React.FC<HudOverlayProps> = ({
                   onOpenSettings();
                 }}
                 aria-label="Open Settings"
-                className="px-2.5 py-1 rounded border border-white/25 text-[10px] font-semibold tracking-wider text-slate-200 hover:text-white hover:border-cyan-400/60 transition-colors cursor-pointer whitespace-nowrap shrink-0"
-                style={{ backgroundColor: 'rgba(8, 13, 26, 0.88)' }}
+                className="px-2 py-0.5 rounded border border-white/20 text-[8.5px] font-semibold tracking-wider text-slate-200 hover:text-white hover:border-cyan-400/60 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                style={{ backgroundColor: 'rgba(8, 13, 26, 0.42)' }}
               >
                 Settings
               </button>
@@ -477,8 +648,8 @@ export const HudOverlay: React.FC<HudOverlayProps> = ({
                   onTogglePause();
                 }}
                 aria-label="Pause Game"
-                className="px-2.5 py-1 rounded border border-white/25 text-[10px] font-semibold tracking-wider text-slate-200 hover:text-white hover:border-cyan-400/60 transition-colors cursor-pointer whitespace-nowrap shrink-0"
-                style={{ backgroundColor: 'rgba(8, 13, 26, 0.88)' }}
+                className="px-2 py-0.5 rounded border border-white/20 text-[8.5px] font-semibold tracking-wider text-slate-200 hover:text-white hover:border-cyan-400/60 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                style={{ backgroundColor: 'rgba(8, 13, 26, 0.42)' }}
               >
                 Pause [P]
               </button>
@@ -492,14 +663,14 @@ export const HudOverlay: React.FC<HudOverlayProps> = ({
                   onToggleMute();
                 }}
                 aria-label={settings.muted ? 'Unmute Audio' : 'Mute Audio'}
-                className="px-2.5 py-1 rounded border border-white/25 text-[10px] font-semibold text-slate-200 hover:text-white hover:border-cyan-400/60 transition-colors cursor-pointer whitespace-nowrap shrink-0"
-                style={{ backgroundColor: 'rgba(8, 13, 26, 0.88)' }}
+                className="px-2 py-0.5 rounded border border-white/20 text-[8.5px] font-semibold text-slate-200 hover:text-white hover:border-cyan-400/60 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                style={{ backgroundColor: 'rgba(8, 13, 26, 0.42)' }}
               >
                 {settings.muted ? 'Muted' : 'Audio'}
               </button>
             </div>
 
-            <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-1">
               {/* Live In-Race Musical Theme Switcher */}
               <button
                 type="button"
@@ -509,8 +680,8 @@ export const HudOverlay: React.FC<HudOverlayProps> = ({
                   scheduleAutoHide();
                   onCycleMusicTheme();
                 }}
-                className="px-2.5 py-0.5 rounded border border-pink-400/35 text-[10px] font-medium tracking-wider text-pink-100 hover:text-white hover:border-pink-400/70 transition-colors cursor-pointer whitespace-nowrap shrink-0"
-                style={{ backgroundColor: 'rgba(8, 13, 26, 0.86)' }}
+                className="px-2 py-0.5 rounded border border-pink-400/30 text-[8.5px] font-medium tracking-wider text-pink-100 hover:text-white hover:border-pink-400/70 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                style={{ backgroundColor: 'rgba(8, 13, 26, 0.38)' }}
               >
                 Music: {activeMusicSpec.shortLabel}
               </button>
@@ -523,41 +694,58 @@ export const HudOverlay: React.FC<HudOverlayProps> = ({
                   scheduleAutoHide();
                   onCycleCamera();
                 }}
-                className="px-2.5 py-0.5 rounded border border-cyan-400/25 text-[10px] font-medium tracking-wider text-cyan-100 hover:text-white hover:border-cyan-400/50 transition-colors cursor-pointer whitespace-nowrap shrink-0"
-                style={{ backgroundColor: 'rgba(8, 13, 26, 0.86)' }}
+                className="px-2 py-0.5 rounded border border-cyan-400/25 text-[8.5px] font-medium tracking-wider text-cyan-100 hover:text-white hover:border-cyan-400/50 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                style={{ backgroundColor: 'rgba(8, 13, 26, 0.38)' }}
               >
                 Cam: {cameraLabel}
               </button>
             </div>
           </div>
 
-          {/* Persistent Top-Right Icon Button to Reveal / Retract the Controls Drawer */}
-          <button
-            type="button"
-            tabIndex={-1}
-            onClick={(e) => {
-              e.currentTarget.blur();
-              handleToggleControlsDrawer();
-            }}
-            aria-label="Toggle HUD Controls"
-            title="Show / Hide Quick Controls & Autopilot Bar"
-            className={`w-8 h-8 rounded-lg border flex items-center justify-center transition-all cursor-pointer shrink-0 ${
-              controlsOpen
-                ? 'border-cyan-400 text-cyan-300 shadow-[0_0_14px_rgba(0,242,254,0.35)]'
-                : demoMode
-                ? 'border-amber-400/60 text-amber-300 hover:border-amber-300'
-                : 'border-white/25 text-slate-300 hover:text-white hover:border-cyan-400/60'
-            }`}
-            style={{ backgroundColor: 'rgba(8, 13, 26, 0.88)' }}
-          >
-            <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2">
-              {controlsOpen ? (
-                <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
-              ) : (
-                <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 12h16M10 18h10" />
-              )}
-            </svg>
-          </button>
+          {/* Persistent Camera View Badge + Top-Right Icon Button to Reveal / Retract the Controls Drawer */}
+          <div className="flex items-center gap-1 shrink-0">
+            <button
+              type="button"
+              tabIndex={-1}
+              data-testid="hud-camera-cycle-btn"
+              onClick={(e) => {
+                e.currentTarget.blur();
+                onCycleCamera();
+              }}
+              title="Switch Player Camera View [C] (Perspective / Chase / Close / Cockpit)"
+              className="h-6 px-2 rounded-md border border-cyan-400/30 text-[8.5px] font-bold tracking-wider text-cyan-200 hover:text-white hover:border-cyan-300 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+              style={{ backgroundColor: 'rgba(8, 13, 26, 0.38)' }}
+            >
+              VIEW: {cameraLabel.toUpperCase()} [C]
+            </button>
+
+            <button
+              type="button"
+              tabIndex={-1}
+              onClick={(e) => {
+                e.currentTarget.blur();
+                handleToggleControlsDrawer();
+              }}
+              aria-label="Toggle HUD Controls"
+              title="Show / Hide Quick Controls & Autopilot Bar"
+              className={`w-6 h-6 rounded-md border flex items-center justify-center transition-all cursor-pointer shrink-0 ${
+                controlsOpen
+                  ? 'border-cyan-400 text-cyan-300 shadow-[0_0_10px_rgba(0,242,254,0.3)]'
+                  : demoMode
+                  ? 'border-amber-400/50 text-amber-300 hover:border-amber-300'
+                  : 'border-white/20 text-slate-300 hover:text-white hover:border-cyan-400/50'
+              }`}
+              style={{ backgroundColor: 'rgba(8, 13, 26, 0.38)' }}
+            >
+              <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2">
+                {controlsOpen ? (
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                ) : (
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 12h16M10 18h10" />
+                )}
+              </svg>
+            </button>
+          </div>
         </div>
       </div>
 
@@ -664,19 +852,19 @@ export const HudOverlay: React.FC<HudOverlayProps> = ({
         </div>
       )}
 
-      {/* BOTTOM BAR: Compact Speedometer + Energy + Bonus Module & Right Track Radar Minimap */}
-      <div className="flex items-end justify-between w-full gap-3 mt-auto">
-        {/* COMPACT BOTTOM-LEFT CLUSTER: Speedometer + Energy Bar + Bonus Module */}
+      {/* BOTTOM BAR: Full-Size Speedometer + Ultra-Compact Transparent Telemetry/Arsenal Cluster & Full-Size Circular Minimap */}
+      <div className="flex items-end justify-between w-full gap-2.5 mt-auto">
+        {/* BOTTOM-LEFT CLUSTER: Speedometer at full current size + significantly reduced & highly transparent Hull/Controls/Slots */}
         <div
-          className="flex items-end gap-3.5 flex-wrap px-3 py-2 rounded-xl border border-cyan-400/25"
+          className="flex items-center gap-2.5 flex-wrap px-2.5 py-1.5 rounded-xl border border-cyan-400/20 backdrop-blur-[3px]"
           style={{
             background:
-              'linear-gradient(135deg, rgba(6, 12, 26, 0.86) 0%, rgba(10, 16, 34, 0.65) 100%)',
-            boxShadow: 'inset 0 1px 0 rgba(0, 242, 254, 0.22), 0 8px 22px rgba(0, 0, 0, 0.55)',
+              'linear-gradient(135deg, rgba(6, 12, 26, 0.34) 0%, rgba(10, 16, 34, 0.22) 100%)',
+            boxShadow: 'inset 0 1px 0 rgba(0, 242, 254, 0.14), 0 6px 16px rgba(0, 0, 0, 0.30)',
           }}
         >
-          {/* Compact Semi-Circular Arc Speedometer Gauge */}
-          <div className="relative w-32 h-18 flex flex-col items-center justify-end">
+          {/* Compact Semi-Circular Arc Speedometer Gauge (KEPT AT EXACT CURRENT SIZE) */}
+          <div className="relative w-32 h-18 flex flex-col items-center justify-end shrink-0">
             <svg
               viewBox="0 0 140 82"
               className="w-full h-full overflow-visible"
@@ -693,7 +881,7 @@ export const HudOverlay: React.FC<HudOverlayProps> = ({
               <path
                 d="M 14 72 A 56 56 0 0 1 126 72"
                 fill="none"
-                stroke="rgba(15, 23, 42, 0.9)"
+                stroke="rgba(15, 23, 42, 0.55)"
                 strokeWidth="11"
                 strokeLinecap="round"
               />
@@ -764,332 +952,284 @@ export const HudOverlay: React.FC<HudOverlayProps> = ({
             </div>
           </div>
 
-          {/* Compact Segmented Hull Energy Bar & Nitro Fuel Reserve Readout */}
-          <div className="flex flex-col pb-0.5 min-w-[162px]">
-            <div className="flex items-baseline justify-between mb-1">
-              <span
-                className={`text-[9px] font-bold tracking-[0.16em] ${
-                  telemetry.energy <= 25 ? 'text-rose-400 animate-pulse' : 'text-cyan-100/90'
-                }`}
-              >
-                {telemetry.isDestroyed
-                  ? 'HULL DESTROYED!'
-                  : telemetry.energy <= 25
-                  ? 'CRITICAL HULL ENERGY!'
-                  : 'HULL ENERGY'}
-              </span>
-              <span
-                data-testid="hud-energy-value"
-                className={`text-xs font-bold tabular-nums ${
-                  telemetry.energy <= 25 ? 'text-rose-400' : 'text-white'
-                }`}
-                style={{ fontFamily: "'Orbitron', sans-serif" }}
-              >
-                {telemetry.energy}%
-              </span>
-            </div>
+          {/* Significantly Reduced Right Column: Compact Hull Energy + Miniaturized Controls & Slots */}
+          <div className="flex flex-col justify-end gap-1">
+            {/* Compact Segmented Hull Energy Bar & Key Hint */}
+            <div className="flex items-center gap-2">
+              <div className="flex flex-col min-w-[96px]">
+                <div className="flex items-baseline justify-between mb-0.5 gap-2">
+                  <span
+                    className={`text-[7px] font-bold tracking-[0.12em] ${
+                      telemetry.energy <= 25 ? 'text-rose-400 animate-pulse' : 'text-cyan-100/85'
+                    }`}
+                  >
+                    {telemetry.isDestroyed
+                      ? 'HULL DESTROYED!'
+                      : telemetry.energy <= 25
+                      ? 'CRITICAL HULL!'
+                      : 'HULL ENERGY'}
+                  </span>
+                  <span
+                    data-testid="hud-energy-value"
+                    className={`text-[9.5px] font-bold tabular-nums leading-none ${
+                      telemetry.energy <= 25 ? 'text-rose-400' : 'text-white'
+                    }`}
+                    style={{ fontFamily: "'Orbitron', sans-serif" }}
+                  >
+                    {telemetry.energy}%
+                  </span>
+                </div>
 
-            {/* 12-segment neon hull/energy bar */}
-            <div className="flex items-center gap-1">
-              {Array.from({ length: energySegments }).map((_, idx) => {
-                const active = idx < filledSegments;
-                const segColors = [
-                  '#00f2fe',
-                  '#00f2fe',
-                  '#38bdf8',
-                  '#38bdf8',
-                  '#60a5fa',
-                  '#818cf8',
-                  '#a78bfa',
-                  '#c084fc',
-                  '#d946ef',
-                  '#e879f9',
-                  '#f472b6',
-                  '#fb7185',
-                ];
-                const barColor = telemetry.energy <= 25 ? '#f43f5e' : segColors[idx];
-                return (
-                  <div
-                    key={idx}
-                    className="h-2.5 w-2.5 rounded-[1px] transition-opacity duration-75"
-                    style={{
-                      backgroundColor: active ? barColor : 'rgba(30, 41, 59, 0.75)',
-                      boxShadow: active ? `0 0 8px ${barColor}aa` : 'none',
-                    }}
-                  />
-                );
-              })}
-            </div>
+                {/* 12-segment neon hull/energy bar (reduced size) */}
+                <div className="flex items-center gap-0.5">
+                  {Array.from({ length: energySegments }).map((_, idx) => {
+                    const active = idx < filledSegments;
+                    const segColors = [
+                      '#00f2fe',
+                      '#00f2fe',
+                      '#38bdf8',
+                      '#38bdf8',
+                      '#60a5fa',
+                      '#818cf8',
+                      '#a78bfa',
+                      '#c084fc',
+                      '#d946ef',
+                      '#e879f9',
+                      '#f472b6',
+                      '#fb7185',
+                    ];
+                    const barColor = telemetry.energy <= 25 ? '#f43f5e' : segColors[idx];
+                    return (
+                      <div
+                        key={idx}
+                        className="h-1.5 w-1.5 rounded-[1px] transition-opacity duration-75"
+                        style={{
+                          backgroundColor: active ? barColor : 'rgba(30, 41, 59, 0.45)',
+                          boxShadow: active ? `0 0 6px ${barColor}99` : 'none',
+                        }}
+                      />
+                    );
+                  })}
+                </div>
+              </div>
 
-            {/* NITRO POWER-UP Blue Fuel Reserve Bar */}
-            <div className="mt-1.5 flex items-center justify-between text-[8px] font-mono tracking-wider">
-              <span className="text-sky-300 font-bold">
-                {telemetry.nitroActive ? 'NITRO OVERDRIVE ACTIVE!' : 'NITRO FUEL RESERVE'}
-              </span>
-              <span data-testid="hud-nitro-value" className="text-sky-200 font-bold tabular-nums">
-                {telemetry.nitroReserve}%
-              </span>
-            </div>
-            <div className="w-full h-1.5 rounded-full bg-slate-900/90 border border-sky-400/30 overflow-hidden mt-0.5">
-              <div
-                className="h-full transition-all duration-150"
-                style={{
-                  width: `${Math.min(100, Math.max(0, telemetry.nitroReserve))}%`,
-                  background: telemetry.nitroActive
-                    ? 'linear-gradient(90deg, #38bdf8 0%, #e0f2fe 100%)'
-                    : 'linear-gradient(90deg, #0284c7 0%, #00d2ff 100%)',
-                  boxShadow: '0 0 10px rgba(0, 210, 255, 0.7)',
-                }}
-              />
-            </div>
-
-            <div className="mt-1 flex items-center justify-between">
               <span
-                className={`text-[8.5px] font-bold tracking-[0.12em] ${
+                className={`text-[6.5px] font-bold tracking-[0.08em] hidden sm:inline ${
                   telemetry.energy <= 25
                     ? 'text-rose-400 animate-pulse'
-                    : telemetry.isBoosting
-                    ? 'text-pink-300'
-                    : telemetry.boostReady
-                    ? 'text-cyan-200'
-                    : 'text-amber-400'
+                    : 'text-cyan-200/75'
                 }`}
               >
                 {telemetry.isDestroyed
-                  ? '0% ENERGY // VEHICLE EXPLODED'
+                  ? '0% ENERGY // EXPLODED'
                   : telemetry.energy <= 25
-                  ? 'DANGER: 0% ENERGY = EXPLOSION!'
-                  : telemetry.isBoosting
-                  ? 'TURBINE BOOST ENGAGED'
-                  : 'BOOST [SHIFT] · BOX [SPACE] · WEAPON [Z]'}
+                  ? 'AVOID GUARDRAILS!'
+                  : 'W/↑ THROTTLE · S/↓ BRAKE · A/D STEER'}
               </span>
             </div>
-          </div>
 
-          {/* IN-GAME POWER-UP / BONUS BOX + ARMY / WEAPON BAY WIDGETS */}
-          <div className="relative pointer-events-auto pb-0.5 flex items-end gap-1.5 flex-wrap">
-            {/* Live Floating In-Game Box Pickup Notification Toast when a power-up or weapon box is collected */}
-            {telemetry.lastCollectedWeapon && telemetry.lastCollectedTimer > 0 ? (
+            {/* MINIATURIZED DRIVING CONTROLS & ORDNANCE SLOTS CLUSTER */}
+            <div className="relative pointer-events-auto flex items-center gap-1 flex-wrap">
+              {/* Compact Interactive WASD / Directional Movement Control Pad */}
               <div
-                data-testid="hud-weapon-pickup-toast"
-                className="absolute bottom-full left-0 mb-2 flex items-center gap-2 px-2.5 py-1.5 rounded-lg border bg-slate-950/95 whitespace-nowrap pointer-events-none z-30"
-                style={{
-                  borderColor: WEAPON_META[telemetry.lastCollectedWeapon].color,
-                  boxShadow: `0 0 18px ${WEAPON_META[telemetry.lastCollectedWeapon].color}44`,
-                }}
+                id="wasd-movement-controls"
+                data-testid="wasd-movement-controls"
+                className="movement-control-container flex items-center gap-0.5 px-1 py-0.5 rounded-lg border border-cyan-400/20"
+                style={{ backgroundColor: 'rgba(6, 11, 24, 0.34)' }}
+                title="WASD / Arrow Keys Movement Controls (W/Up: Throttle, S/Down: Brake, A/Left: Steer Left, D/Right: Steer Right)"
               >
-                <WeaponSvgIcon type={telemetry.lastCollectedWeapon} sizeClass="w-8 h-8" />
-                <div>
-                  <div className="flex items-center gap-1.5">
-                    <span
-                      className="text-[10px] font-black tracking-wider uppercase"
-                      style={{ color: WEAPON_META[telemetry.lastCollectedWeapon].color }}
-                    >
-                      {WEAPON_META[telemetry.lastCollectedWeapon].label}
-                    </span>
-                    <span className="text-[8px] font-mono px-1 py-0.2 rounded bg-rose-500/25 text-rose-200">
-                      ARMED [Z]
-                    </span>
-                  </div>
-                  <div className="text-[9px] font-bold text-slate-200">
-                    {WEAPON_META[telemetry.lastCollectedWeapon].effectBadge} · Press [Z] to fire
-                  </div>
+                <button
+                  id="move-left-btn"
+                  type="button"
+                  tabIndex={-1}
+                  data-testid="move-left-btn"
+                  aria-label="Move Left (A / ArrowLeft)"
+                  onMouseDown={(e) => {
+                    e.currentTarget.blur();
+                    onTriggerSteer?.(-1);
+                  }}
+                  onMouseUp={() => onTriggerSteer?.(0)}
+                  onMouseLeave={() => onTriggerSteer?.(0)}
+                  onTouchStart={() => onTriggerSteer?.(-1)}
+                  onTouchEnd={() => onTriggerSteer?.(0)}
+                  className="w-5 h-6 rounded border border-cyan-400/25 bg-slate-900/40 hover:border-cyan-300 active:bg-cyan-500/30 text-[7px] font-mono font-bold text-cyan-200 flex flex-col items-center justify-center leading-none cursor-pointer"
+                >
+                  <span>A</span>
+                  <span className="text-[5px] text-slate-400">L</span>
+                </button>
+                <div className="flex flex-col gap-0.5">
+                  <button
+                    id="move-up-btn"
+                    type="button"
+                    tabIndex={-1}
+                    data-testid="move-up-btn"
+                    aria-label="Move Up / Throttle (W / ArrowUp)"
+                    onMouseDown={(e) => {
+                      e.currentTarget.blur();
+                      onTriggerThrottle?.(true);
+                    }}
+                    onMouseUp={() => onTriggerThrottle?.(false)}
+                    onMouseLeave={() => onTriggerThrottle?.(false)}
+                    onTouchStart={() => onTriggerThrottle?.(true)}
+                    onTouchEnd={() => onTriggerThrottle?.(false)}
+                    className="w-6 h-2.5 rounded-[3px] border border-cyan-400/25 bg-slate-900/40 hover:border-cyan-300 active:bg-cyan-500/30 text-[6px] font-mono font-bold text-cyan-200 flex items-center justify-center leading-none cursor-pointer"
+                  >
+                    W·UP
+                  </button>
+                  <button
+                    id="move-down-btn"
+                    type="button"
+                    tabIndex={-1}
+                    data-testid="move-down-btn"
+                    aria-label="Move Down / Brake (S / ArrowDown)"
+                    onMouseDown={(e) => {
+                      e.currentTarget.blur();
+                      onTriggerBrake?.(true);
+                    }}
+                    onMouseUp={() => onTriggerBrake?.(false)}
+                    onMouseLeave={() => onTriggerBrake?.(false)}
+                    onTouchStart={() => onTriggerBrake?.(true)}
+                    onTouchEnd={() => onTriggerBrake?.(false)}
+                    className="w-6 h-2.5 rounded-[3px] border border-cyan-400/25 bg-slate-900/40 hover:border-cyan-300 active:bg-cyan-500/30 text-[6px] font-mono font-bold text-slate-300 flex items-center justify-center leading-none cursor-pointer"
+                  >
+                    S·DN
+                  </button>
                 </div>
+                <button
+                  id="move-right-btn"
+                  type="button"
+                  tabIndex={-1}
+                  data-testid="move-right-btn"
+                  aria-label="Move Right (D / ArrowRight)"
+                  onMouseDown={(e) => {
+                    e.currentTarget.blur();
+                    onTriggerSteer?.(1);
+                  }}
+                  onMouseUp={() => onTriggerSteer?.(0)}
+                  onMouseLeave={() => onTriggerSteer?.(0)}
+                  onTouchStart={() => onTriggerSteer?.(1)}
+                  onTouchEnd={() => onTriggerSteer?.(0)}
+                  className="w-5 h-6 rounded border border-cyan-400/25 bg-slate-900/40 hover:border-cyan-300 active:bg-cyan-500/30 text-[7px] font-mono font-bold text-cyan-200 flex flex-col items-center justify-center leading-none cursor-pointer"
+                >
+                  <span>D</span>
+                  <span className="text-[5px] text-slate-400">R</span>
+                </button>
               </div>
-            ) : telemetry.lastCollectedPowerUp && telemetry.lastCollectedTimer > 0 ? (
-              <div
-                data-testid="hud-powerup-pickup-toast"
-                className="absolute bottom-full left-0 mb-2 flex items-center gap-2 px-2.5 py-1.5 rounded-lg border bg-slate-950/95 whitespace-nowrap pointer-events-none z-30"
-                style={{
-                  borderColor: POWERUP_META[telemetry.lastCollectedPowerUp].color,
-                  boxShadow: `0 0 18px ${POWERUP_META[telemetry.lastCollectedPowerUp].color}44`,
+
+              {/* Compact Power-Up Box [SPACE] Slot */}
+              <button
+                type="button"
+                tabIndex={-1}
+                data-testid="hud-bonus-slot"
+                onClick={(e) => {
+                  e.currentTarget.blur();
+                  onTriggerBonus();
                 }}
+                className="flex items-center gap-1.5 px-1.5 py-1 rounded-lg border transition-all cursor-pointer"
+                style={{
+                  background:
+                    'linear-gradient(145deg, rgba(6, 11, 24, 0.36) 0%, rgba(10, 17, 36, 0.24) 100%)',
+                  borderColor: hasBonus ? bonusMeta.color : 'rgba(56, 189, 248, 0.22)',
+                  boxShadow: hasBonus
+                    ? `0 4px 12px rgba(0, 0, 0, 0.35), 0 0 10px ${bonusMeta.color}33`
+                    : 'none',
+                }}
+                title="Activate Held Power-Up [SPACE]"
               >
-                <PowerUpSpriteIcon
-                  type={telemetry.lastCollectedPowerUp}
-                  sizeClass="w-8 h-8"
-                />
-                <div>
-                  <div className="flex items-center gap-1.5">
-                    <span
-                      className="text-[10px] font-black tracking-wider uppercase"
-                      style={{ color: POWERUP_META[telemetry.lastCollectedPowerUp].color }}
-                    >
-                      {POWERUP_META[telemetry.lastCollectedPowerUp].label}
+                {heldPowerUpType ? (
+                  <PowerUpSpriteIcon type={heldPowerUpType} sizeClass="w-5 h-5" />
+                ) : (
+                  <div className="w-5 h-5 rounded border border-cyan-400/20 bg-slate-950/40 flex items-center justify-center text-[7px] font-mono font-bold text-slate-400">
+                    SPC
+                  </div>
+                )}
+                <div className="text-left leading-tight">
+                  <div className="flex items-center gap-1">
+                    <span className="text-[6.5px] font-bold tracking-[0.1em] text-slate-300 uppercase">
+                      POWER-UP
                     </span>
-                    <span className="text-[8px] font-mono px-1 py-0.2 rounded bg-white/10 text-white">
-                      COLLECTED
+                    <span className="px-0.5 rounded bg-white/10 text-[6px] font-mono font-bold text-cyan-200">
+                      [SPACE]
                     </span>
                   </div>
-                  <div className="text-[9px] font-bold text-slate-200">
-                    {POWERUP_META[telemetry.lastCollectedPowerUp].effectBadge}
+                  <div
+                    className="text-[7.5px] font-extrabold tracking-wider uppercase truncate max-w-[72px]"
+                    style={{
+                      color: hasBonus ? bonusMeta.color : '#94a3b8',
+                      fontFamily: "'Orbitron', sans-serif",
+                    }}
+                  >
+                    {hasBonus ? bonusMeta.label : 'EMPTY SLOT'}
                   </div>
                 </div>
-              </div>
-            ) : null}
+              </button>
 
-            {/* POWER-UP BOX SLOT [SPACE] */}
-            <button
-              type="button"
-              tabIndex={-1}
-              data-testid="hud-powerup-box-button"
-              disabled={telemetry.heldBonus === 'none' && telemetry.nitroReserve < 25}
-              onClick={(e) => {
-                e.currentTarget.blur();
-                onTriggerBonus();
-              }}
-              className={`flex items-center gap-2 px-2.5 py-1.5 rounded-xl border text-left transition-all ${
-                telemetry.heldBonus !== 'none' || telemetry.nitroReserve >= 25
-                  ? 'border-cyan-400/80 hover:border-cyan-300 cursor-pointer'
-                  : 'border-white/15 opacity-80 cursor-default'
-              }`}
-              style={{
-                backgroundColor: 'rgba(8, 13, 26, 0.94)',
-                boxShadow:
-                  telemetry.heldBonus !== 'none'
-                    ? `0 0 16px ${bonusInfo.color}38, inset 0 0 10px ${bonusInfo.color}22`
-                    : 'none',
-              }}
-            >
-              {bonusInfo.powerUpId ? (
-                <PowerUpSpriteIcon type={bonusInfo.powerUpId} sizeClass="w-10 h-10" />
-              ) : telemetry.nitroReserve >= 25 ? (
-                <PowerUpSpriteIcon type="nitro" sizeClass="w-10 h-10" />
-              ) : (
-                <div
-                  className="w-10 h-10 rounded-lg flex flex-col items-center justify-center shrink-0 border border-dashed border-cyan-400/40 bg-slate-900/90"
-                  title="In-Game Power-Up Box Empty"
-                >
-                  <span className="text-[8px] font-mono font-bold text-cyan-300/80">BOX</span>
-                  <span className="text-[7px] font-mono text-slate-400">EMPTY</span>
+              {/* Compact Army / Weapon Bay [Z] Slot */}
+              <button
+                type="button"
+                tabIndex={-1}
+                data-testid="hud-weapon-slot"
+                onClick={(e) => {
+                  e.currentTarget.blur();
+                  onTriggerWeapon?.();
+                }}
+                className="flex items-center gap-1.5 px-1.5 py-1 rounded-lg border transition-all cursor-pointer"
+                style={{
+                  background:
+                    'linear-gradient(145deg, rgba(6, 11, 24, 0.36) 0%, rgba(10, 17, 36, 0.24) 100%)',
+                  borderColor: hasWeapon && weaponMeta ? weaponMeta.color : 'rgba(244, 63, 94, 0.22)',
+                  boxShadow:
+                    hasWeapon && weaponMeta
+                      ? `0 4px 12px rgba(0, 0, 0, 0.35), 0 0 10px ${weaponMeta.color}33`
+                      : 'none',
+                }}
+                title="Fire Held Weapon [Z]"
+              >
+                {hasWeapon && telemetry.heldWeapon !== 'none' ? (
+                  <WeaponSvgIcon type={telemetry.heldWeapon} sizeClass="w-5 h-5" />
+                ) : (
+                  <div className="w-5 h-5 rounded border border-rose-400/20 bg-slate-950/40 flex items-center justify-center text-[7px] font-mono font-bold text-slate-400">
+                    [Z]
+                  </div>
+                )}
+                <div className="text-left leading-tight">
+                  <div className="flex items-center gap-1">
+                    <span className="text-[6.5px] font-bold tracking-[0.1em] text-slate-300 uppercase">
+                      WEAPON BAY
+                    </span>
+                    <span className="px-0.5 rounded bg-rose-500/20 text-[6px] font-mono font-bold text-rose-200">
+                      [Z] FIRE
+                    </span>
+                  </div>
+                  <div
+                    className="text-[7.5px] font-extrabold tracking-wider uppercase truncate max-w-[72px]"
+                    style={{
+                      color: hasWeapon && weaponMeta ? weaponMeta.color : '#94a3b8',
+                      fontFamily: "'Orbitron', sans-serif",
+                    }}
+                  >
+                    {hasWeapon && weaponMeta ? weaponMeta.shortLabel : 'NO ORDNANCE'}
+                  </div>
                 </div>
-              )}
+              </button>
 
-              <div className="min-w-[126px]">
-                <div className="flex items-center justify-between gap-1.5">
-                  <span className="text-[8px] font-mono font-bold tracking-[0.14em] text-cyan-300 uppercase">
-                    {telemetry.heldBonus !== 'none' ? 'LOCKED UNTIL USED' : 'POWER-UP BOX'}
-                  </span>
-                  <span className="text-[8px] font-mono font-bold px-1 rounded bg-cyan-500/20 text-cyan-200 border border-cyan-400/40">
-                    [SPACE]
-                  </span>
-                </div>
-                <div
-                  data-testid="hud-powerup-box-label"
-                  className="text-[10.5px] font-black tracking-wider uppercase truncate mt-0.5"
-                  style={{
-                    color:
-                      telemetry.heldBonus !== 'none'
-                        ? bonusInfo.color
-                        : telemetry.nitroReserve >= 25
-                        ? '#00d2ff'
-                        : '#94a3b8',
-                  }}
-                >
-                  {telemetry.heldBonus !== 'none'
-                    ? bonusInfo.label
-                    : telemetry.nitroReserve >= 25
-                    ? 'NITRO RESERVE READY'
-                    : bonusInfo.label}
-                </div>
-                <div className="text-[8.5px] text-slate-300 max-w-[140px] truncate">
-                  {telemetry.heldBonus !== 'none'
-                    ? bonusInfo.effectBadge ?? bonusInfo.description
-                    : telemetry.nitroReserve >= 25
-                    ? 'Press [SPACE] for blue-fuel boost'
-                    : 'Hit track boxes to arm power-up'}
-                </div>
-              </div>
-            </button>
-
-            {/* ARMY / WEAPON BAY SLOT [Z] */}
-            <button
-              type="button"
-              tabIndex={-1}
-              data-testid="hud-weapon-box-button"
-              disabled={telemetry.heldWeapon === 'none'}
-              onClick={(e) => {
-                e.currentTarget.blur();
-                onTriggerWeapon?.();
-              }}
-              className={`flex items-center gap-2 px-2.5 py-1.5 rounded-xl border text-left transition-all ${
-                telemetry.heldWeapon !== 'none'
-                  ? 'border-rose-400/85 hover:border-rose-300 cursor-pointer'
-                  : 'border-white/15 opacity-80 cursor-default'
-              }`}
-              style={{
-                backgroundColor: 'rgba(8, 13, 26, 0.94)',
-                boxShadow:
-                  telemetry.heldWeapon !== 'none'
-                    ? `0 0 18px ${WEAPON_META[telemetry.heldWeapon].color}44, inset 0 0 10px ${WEAPON_META[telemetry.heldWeapon].color}22`
-                    : 'none',
-              }}
-            >
-              {telemetry.heldWeapon !== 'none' ? (
-                <WeaponSvgIcon type={telemetry.heldWeapon} sizeClass="w-10 h-10" />
-              ) : (
-                <div
-                  className="w-10 h-10 rounded-lg flex flex-col items-center justify-center shrink-0 border border-dashed border-rose-400/40 bg-slate-900/90"
-                  title="Army / Weapon Bay Empty"
-                >
-                  <span className="text-[8px] font-mono font-bold text-rose-300/80">ARMY</span>
-                  <span className="text-[7px] font-mono text-slate-400">EMPTY</span>
-                </div>
-              )}
-
-              <div className="min-w-[132px]">
-                <div className="flex items-center justify-between gap-1.5">
-                  <span className="text-[8px] font-mono font-bold tracking-[0.14em] text-rose-300 uppercase">
-                    {telemetry.heldWeapon !== 'none' ? 'LOCKED UNTIL USED' : 'ARMY WEAPON BAY'}
-                  </span>
-                  <span className="text-[8px] font-mono font-bold px-1 rounded bg-rose-500/25 text-rose-200 border border-rose-400/50">
-                    [Z] FIRE
-                  </span>
-                </div>
-                <div
-                  data-testid="hud-weapon-box-label"
-                  className="text-[10.5px] font-black tracking-wider uppercase truncate mt-0.5"
-                  style={{
-                    color:
-                      telemetry.heldWeapon !== 'none'
-                        ? WEAPON_META[telemetry.heldWeapon].color
-                        : '#94a3b8',
-                  }}
-                >
-                  {telemetry.heldWeapon !== 'none'
-                    ? WEAPON_META[telemetry.heldWeapon].shortLabel
-                    : 'WEAPON BAY EMPTY'}
-                </div>
-                <div className="text-[8.5px] text-slate-300 max-w-[146px] truncate">
-                  {telemetry.heldWeapon !== 'none'
-                    ? telemetry.targetLockedName &&
-                      (telemetry.heldWeapon === 'missile' || telemetry.heldWeapon === 'laser')
-                      ? `LOCK: ${telemetry.targetLockedName} · Press [Z]`
-                      : `${WEAPON_META[telemetry.heldWeapon].effectBadge} · Press [Z]`
-                    : 'Collect weapon crate to arm [Z]'}
-                </div>
-              </div>
-            </button>
-
-            {/* Quick Toggle Button to Inspect All 6 Power-Ups & 4 Army Weapons */}
-            <button
-              type="button"
-              tabIndex={-1}
-              data-testid="hud-powerup-codex-toggle"
-              onClick={(e) => {
-                e.currentTarget.blur();
-                setCodexOpen((prev) => !prev);
-              }}
-              title="Inspect Power-Ups & Army Weapons [I]"
-              className={`h-12 px-2 rounded-xl border flex flex-col items-center justify-center gap-0.5 text-[8.5px] font-mono font-bold transition-all cursor-pointer shrink-0 ${
-                codexOpen
-                  ? 'border-cyan-300 bg-cyan-950/90 text-white shadow-[0_0_14px_rgba(0,242,254,0.4)]'
-                  : 'border-cyan-400/35 bg-slate-950/90 text-cyan-200 hover:border-cyan-300 hover:text-white'
-              }`}
-            >
-              <span>ARSENAL</span>
-              <span className="text-[8px] text-cyan-400">[I]</span>
-            </button>
+              {/* Compact Arsenal / Power-Up Codex Button [I] */}
+              <button
+                type="button"
+                tabIndex={-1}
+                data-testid="hud-codex-btn"
+                onClick={(e) => {
+                  e.currentTarget.blur();
+                  setCodexOpen((prev) => !prev);
+                }}
+                className="h-7 px-1.5 rounded-lg border border-cyan-400/25 hover:border-cyan-300 text-[7px] font-mono font-bold text-cyan-200 flex flex-col items-center justify-center leading-none cursor-pointer"
+                style={{ backgroundColor: 'rgba(6, 11, 24, 0.36)' }}
+                title="Inspect Power-Ups & Weapons Codex [I]"
+              >
+                <span>ARSENAL</span>
+                <span className="text-[6px] text-cyan-400 mt-0.5">[I]</span>
+              </button>
+            </div>
           </div>
         </div>
 
@@ -1193,13 +1333,13 @@ export const HudOverlay: React.FC<HudOverlayProps> = ({
           </div>
         )}
 
-        {/* COMPACT BOTTOM-RIGHT CLUSTER: Circular Track Spline Radar Minimap */}
+        {/* COMPACT BOTTOM-RIGHT CLUSTER: Circular Track Spline Radar Minimap (KEPT AT EXACT CURRENT SIZE, HIGHER TRANSPARENCY) */}
         <div
-          className="relative w-28 h-28 md:w-32 md:h-32 rounded-full border border-cyan-400/45 flex items-center justify-center shrink-0"
+          className="relative w-28 h-28 md:w-32 md:h-32 rounded-full border border-cyan-400/35 flex items-center justify-center shrink-0 backdrop-blur-[2px]"
           style={{
-            backgroundColor: 'rgba(6, 11, 24, 0.86)',
+            backgroundColor: 'rgba(6, 11, 24, 0.34)',
             boxShadow:
-              'inset 0 0 20px rgba(0, 242, 254, 0.2), 0 6px 18px rgba(0, 0, 0, 0.55)',
+              'inset 0 0 18px rgba(0, 242, 254, 0.16), 0 6px 16px rgba(0, 0, 0, 0.32)',
           }}
         >
           <svg viewBox="0 0 150 150" className="w-full h-full">

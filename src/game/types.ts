@@ -14,9 +14,16 @@ export interface WeatherState {
   label: string;
   surfaceGrip: number; // 1.0 (dry/clear) down to 0.58 (heavy storm)
   visibilityFactor: number; // 1.0 (clear) down to 0.52 (heavy fog/precipitation)
+  cloudDensity?: number; // 0..1 storm cloud canopy & vortex density
+  stormPhase?:
+    | 'clear'
+    | 'gathering_clouds'
+    | 'distant_lightning'
+    | 'monsoon_squall'
+    | 'supercell_vortex';
 }
 
-export type CameraMode = 'chase' | 'close' | 'cockpit';
+export type CameraMode = 'perspective' | 'chase' | 'close' | 'cockpit';
 
 export type DebugMode = 'off' | 'explore' | 'vehicle_orbit';
 
@@ -129,6 +136,7 @@ export interface GameSettings {
   enableTrackDebris: boolean;
   neonIntensity: number;
   autoAccelerate: boolean;
+  gameSpeed: number;
 }
 
 export interface TrackPad {
@@ -197,6 +205,9 @@ export interface RacerState {
   yawOffset: number;
   ringChain: number;
   ringChainTimer: number;
+  boostComboCount?: number;
+  boostComboTimer?: number;
+  lastBoostPadId?: number | null;
   heldBonus: BonusType;
   heldWeapon: WeaponType;
   laserActiveTimer: number;
@@ -248,6 +259,8 @@ export interface HudTelemetry {
   isDestroyed: boolean;
   targetLockedName: string | null;
   ringChain: number;
+  boostComboCount?: number;
+  boostComboTimer?: number;
   shieldActive: boolean;
   shieldRemainingSec: number;
   wrongWay: boolean;
