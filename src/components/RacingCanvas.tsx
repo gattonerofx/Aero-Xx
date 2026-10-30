@@ -2704,12 +2704,12 @@ export const RacingCanvas: React.FC<RacingCanvasProps> = ({
 
       stormCanopyMat.uniforms.uTime.value = timeSec;
       stormCanopyMat.uniforms.uCloudDensity.value = cloudDensityVal;
-      stormCanopyMat.uniforms.uDistantFlash.value = distantSheetFlash;
+      stormCanopyMat.uniforms.uSheetFlash.value = distantSheetFlash;
       stormCanopyMat.uniforms.uBoltFlash.value = multiFlicker;
 
       stormVortexMat.uniforms.uTime.value = timeSec;
-      stormVortexMat.uniforms.uCloudDensity.value = cloudDensityVal;
-      stormVortexMat.uniforms.uDistantFlash.value = distantSheetFlash;
+      stormVortexMat.uniforms.uStormIntensity.value = currentWeather.intensity;
+      stormVortexMat.uniforms.uSheetFlash.value = distantSheetFlash;
       stormVortexMat.uniforms.uBoltFlash.value = multiFlicker;
       stormVortexMat.uniforms.uBoltSeed.value = lightningBoltSeed;
       stormVortexMat.uniforms.uBoltXOffset.value = lightningBoltXOffset;

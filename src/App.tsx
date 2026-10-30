@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
 import {
   AtmosphereMode,
   CameraMode,
@@ -18,9 +18,13 @@ import {
 } from './game/types';
 import { DEFAULT_SETTINGS, DEFAULT_UPGRADES, MUSIC_THEMES } from './game/rules';
 import { audioEngine } from './game/audio';
-import { RacingCanvas } from './components/RacingCanvas';
 import { HudOverlay } from './components/HudOverlay';
 import { TitleScreen } from './components/TitleScreen';
+
+const RacingCanvas = lazy(async () => {
+  const module = await import('./components/RacingCanvas');
+  return { default: module.RacingCanvas };
+});
 import {
   DebugModeOverlay,
   PauseModal,
@@ -400,27 +404,35 @@ export default function App() {
       className="movement-control-container relative w-screen h-screen overflow-hidden bg-[#05070d] select-none outline-none"
     >
       {/* Persistent 3D WebGL Anti-Gravity Track & Craft Viewport */}
-      <RacingCanvas
-        gameState={gameState}
-        settings={settings}
-        upgrades={upgrades}
-        totalCredits={totalCredits}
-        onEarnCredits={handleEarnCredits}
-        demoMode={demoMode}
-        debugMode={debugMode}
-        debugMenuOpen={debugMenuOpen}
-        cameraPaused={cameraPaused}
-        teleportRequest={teleportRequest}
-        raceNonce={raceNonce}
-        onTelemetryUpdate={setTelemetry}
-        onRaceFinish={handleRaceFinish}
-        onTogglePause={handleTogglePause}
-        onToggleCameraPause={handleToggleCameraPause}
-        onOpenDebugMenu={handleOpenDebugMenu}
-        onCycleCamera={handleCycleCamera}
-        onTakeControl={handleTakeControl}
-        actionTriggerRef={actionTriggerRef}
-      />
+      <Suspense
+        fallback={
+          <div className="absolute inset-0 flex items-center justify-center bg-[#05070d] text-slate-200 text-sm uppercase tracking-[0.4em] opacity-80">
+            Loading race view...
+          </div>
+        }
+      >
+        <RacingCanvas
+          gameState={gameState}
+          settings={settings}
+          upgrades={upgrades}
+          totalCredits={totalCredits}
+          onEarnCredits={handleEarnCredits}
+          demoMode={demoMode}
+          debugMode={debugMode}
+          debugMenuOpen={debugMenuOpen}
+          cameraPaused={cameraPaused}
+          teleportRequest={teleportRequest}
+          raceNonce={raceNonce}
+          onTelemetryUpdate={setTelemetry}
+          onRaceFinish={handleRaceFinish}
+          onTogglePause={handleTogglePause}
+          onToggleCameraPause={handleToggleCameraPause}
+          onOpenDebugMenu={handleOpenDebugMenu}
+          onCycleCamera={handleCycleCamera}
+          onTakeControl={handleTakeControl}
+          actionTriggerRef={actionTriggerRef}
+        />
+      </Suspense>
 
       {/* Title Screen Stage Overlay */}
       {gameState === 'title' && debugMode === 'off' && !debugMenuOpen && (
